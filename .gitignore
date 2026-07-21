@@ -35,5 +35,6 @@ __pycache__
 
 # Local build and downloaded dependency workspaces.
 /build/
+/cpp_runtime/build/
 /cmake-build-*/
 /third_party/
