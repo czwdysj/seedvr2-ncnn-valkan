@@ -12,8 +12,8 @@
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
 
-import torch
-import torch.nn.functional as F
+import torch # type: ignore
+import torch.nn.functional as F # pyright: ignore[reportMissingImports]
 
 from flash_attn import flash_attn_varlen_func
 

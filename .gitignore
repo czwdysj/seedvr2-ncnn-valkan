@@ -24,3 +24,16 @@ __pycache__
 /test_videos
 /results
 /ckpts
+
+# SeedVR2 NCNN local artifacts and generated outputs.
+/weights/
+/outputs/
+/test_vectors/
+/pnnx_export/
+/ncnn_models/
+/learn_pnnx/out/
+
+# Local build and downloaded dependency workspaces.
+/build/
+/cmake-build-*/
+/third_party/
