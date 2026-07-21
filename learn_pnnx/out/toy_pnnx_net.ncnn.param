@@ -1,0 +1,23 @@
+7767517
+21 22
+Input                    in0                      0 1 in0
+Convolution              convrelu_0               1 1 in0 1 0=8 1=3 11=3 12=1 13=1 14=1 2=1 3=1 4=1 5=1 6=216 9=1
+Pooling                  maxpool2d_12             1 1 1 2 0=0 1=2 11=2 12=2 13=0 2=2 3=0 5=1
+Split                    splitncnn_0              1 2 2 3 4
+ConvolutionDepthWise     convdw_19                1 1 4 5 0=8 1=3 11=3 12=1 13=1 14=1 2=1 3=1 4=1 5=1 6=72 7=8
+Swish                    silu_15                  1 1 5 6
+Convolution              convrelu_1               1 1 6 7 0=16 1=1 -23310=1,0.1 11=1 12=1 13=1 14=0 2=1 3=1 4=0 5=1 6=128 9=2
+Convolution              conv_4                   1 1 3 8 0=16 1=1 11=1 12=1 13=1 14=0 2=1 3=1 4=0 5=1 6=128
+BinaryOp                 add_0                    2 1 7 8 9 0=0
+Pooling                  avgpool2d_1              1 1 9 10 0=1 1=2 11=2 12=2 13=0 2=2 3=0 5=1 6=1
+Convolution              conv_5                   1 1 10 11 0=24 1=3 11=3 12=1 13=1 14=1 2=1 3=1 4=1 5=1 6=3456
+PReLU                    prelu_13                 1 1 11 12 0=24
+Interp                   upsample_16              1 1 12 13 0=1 1=2.0 2=2.0 6=0
+Convolution              conv_6                   1 1 13 14 0=24 1=3 11=3 12=1 13=2 14=1 2=1 3=2 4=1 5=0 6=5184
+GELU                     gelu_7                   1 1 14 15
+Pooling                  aap_18                   1 1 15 16 0=1 18=4 7=1 8=4
+Flatten                  flatten_17               1 1 16 17
+InnerProduct             linear_10                1 1 17 18 0=32 1=1 2=12288
+HardSwish                hswish_8                 1 1 18 19 0=0.166666672 1=0.5
+InnerProduct             linear_11                1 1 19 20 0=10 1=1 2=320
+Softmax                  softmax_0                1 1 20 out0 0=0 1=1
