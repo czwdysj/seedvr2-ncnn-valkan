@@ -101,10 +101,10 @@ decoder: [1,16,2,4,4] 和 [1,16,3,6,8]
 
 | 随机视频 | 输入形状 | 模块 | 输出形状 | max abs | mean abs | RMSE |
 | --- | --- | --- | --- | ---: | ---: | ---: |
-| case 0 | `[1,3,6,37,53]` | encoder | `[32,2,4,6]` | `1.66893e-5` | `2.94112e-6` | `3.87865e-6` |
-| case 0 | mean `[1,16,2,4,6]` | decoder | `[3,5,32,48]` | `8.18521e-5` | `6.45388e-6` | `8.87502e-6` |
-| case 1 | `[1,3,10,41,67]` | encoder | `[32,3,5,8]` | `2.28882e-5` | `2.87299e-6` | `3.89061e-6` |
-| case 1 | mean `[1,16,3,5,8]` | decoder | `[3,9,40,64]` | `1.13636e-4` | `7.25689e-6` | `9.82329e-6` |
+| case 0 | `[1,3,6,37,53]` | encoder | `[32,2,4,6]` | `4.19617e-5` | `5.34756e-6` | `7.50733e-6` |
+| case 0 | mean `[1,16,2,4,6]` | decoder | `[3,5,32,48]` | `7.43121e-5` | `7.95422e-6` | `1.07874e-5` |
+| case 1 | `[1,3,10,41,67]` | encoder | `[32,3,5,8]` | `5.53131e-5` | `5.51284e-6` | `8.06667e-6` |
+| case 1 | mean `[1,16,3,5,8]` | decoder | `[3,9,40,64]` | `8.49962e-5` | `7.31824e-6` | `9.93329e-6` |
 
 测试通过标准为 FP32 `max_abs <= 5e-4`。四项均通过。
 
@@ -134,5 +134,5 @@ python tools/test_seedvr2_vae_dynamic_ncnn.py
 - batch 固定为 1。
 - 当前是 whole-clip 推理，不包含 streaming `memory_state=ACTIVE` 和跨 clip cache。
 - C++ 动态层当前实现并验证的是 FP32 CPU 路径。
-- 普通 NCNN 层具备 Vulkan 后端，但三个动态层尚未实现 `VkMat` shader，因此当前 runner 明确关闭 Vulkan。不能把本次结果表述为 Vulkan 动态 VAE 已完成。
-- 下一阶段需要为三个动态层补 Vulkan pipeline，优先顺序为 GroupNorm、space-time shuffle、spatial attention，并使用相同随机测试做 CPU/Vulkan/PyTorch 三方对齐。
+- 当前交付范围按用户最新要求固定为 CPU；runner 明确关闭 Vulkan。
+- 三个动态层未实现 `VkMat` shader，不能把本次结果表述为 Vulkan 动态 VAE 已完成。

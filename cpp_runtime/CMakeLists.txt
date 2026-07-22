@@ -1,8 +1,8 @@
-# 本文件负责构建 SeedVR2 VAE 动态形状 NCNN 测试运行器。
-# 这里把自定义 CPU layer 和一个命令行 runner 编到同一个可执行文件里，
-# 主要用于验证 pnnx 导出的 VAE 子图能否在不同 T,H,W 输入下和 PyTorch 对齐。
+# 本文件负责构建 SeedVR2 NCNN 的分层数值测试运行器。
+# 当前包含动态 VAE runner 和 DiT block runner；它们分别加载真实 param/bin，
+# 用于在组装完整 Engine 前验证每个自定义层及其周围原生 NCNN 子图。
 cmake_minimum_required(VERSION 3.16)
-project(seedvr2_vae_dynamic LANGUAGES CXX)
+project(seedvr2_ncnn_runtime LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,3 +32,36 @@ add_executable(
     ../custom_layers/dynamic_space_time_shuffle.cpp)
 target_include_directories(seedvr2_vae_dynamic_runner PRIVATE ../custom_layers)
 target_link_libraries(seedvr2_vae_dynamic_runner PRIVATE ncnn)
+
+# DiT runner 一次只加载一个 block，使 3B 模型可以在有限内存设备上逐层验证。
+add_executable(
+    seedvr2_dit_block_runner
+    dit_block_runner.cpp
+    ../custom_layers/seedvr2_dit_block.cpp)
+target_include_directories(seedvr2_dit_block_runner PRIVATE ../custom_layers)
+target_link_libraries(seedvr2_dit_block_runner PRIVATE ncnn)
+
+# DiT 输入与输出头单独测试，便于分别定位 patch、embedding 和 output Ada。
+add_executable(
+    seedvr2_dit_input_runner
+    dit_input_runner.cpp
+    ../custom_layers/seedvr2_dit_input.cpp)
+target_include_directories(seedvr2_dit_input_runner PRIVATE ../custom_layers)
+target_link_libraries(seedvr2_dit_input_runner PRIVATE ncnn)
+
+add_executable(
+    seedvr2_dit_output_runner
+    dit_output_runner.cpp
+    ../custom_layers/seedvr2_dit_output.cpp)
+target_include_directories(seedvr2_dit_output_runner PRIVATE ../custom_layers)
+target_link_libraries(seedvr2_dit_output_runner PRIVATE ncnn)
+
+# 完整 DiT runner 按 block 流式加载，验证转换后的 3B 主干可以真正串联推理。
+add_executable(
+    seedvr2_dit_full_runner
+    dit_full_runner.cpp
+    ../custom_layers/seedvr2_dit_input.cpp
+    ../custom_layers/seedvr2_dit_block.cpp
+    ../custom_layers/seedvr2_dit_output.cpp)
+target_include_directories(seedvr2_dit_full_runner PRIVATE ../custom_layers)
+target_link_libraries(seedvr2_dit_full_runner PRIVATE ncnn)

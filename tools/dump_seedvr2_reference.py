@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""
-Run a single SeedVR2 PyTorch reference inference and save validation tensors.
+"""生成 SeedVR2 3B 到 NCNN/Vulkan 转换所需的 PyTorch 数值参考。
 
-This script is intended for the first NCNN porting baseline. It runs the
-SeedVR2 3B PyTorch model from `pytorch_model/`, saves the final restored video,
-and dumps deterministic intermediate tensors that later NCNN and pnnx outputs
-can be compared against. It injects lightweight runtime fallbacks for apex fused
-normalization and flash-attn varlen attention so small reference cases can run
-on environments where those optional CUDA extensions are unavailable.
+本文件负责运行一个完整的 SeedVR2 视频增强样例，并保存 VAE、DiT、CFG、
+Euler sampler 和最终视频的确定性参考张量。开启 ``--dump-all-blocks`` 后，
+脚本会区分正负文本分支保存全部 32 个 Transformer block 的输入输出；指定的
+deep block 还会保存 QKV、Q/K RMSNorm、RoPE 后 attention 输入和变长序列边界。
+这些张量用于逐层判断 NCNN CPU 与 Vulkan 实现是否真的对齐，而不是只比较
+最终视频。运行假设为 batch=1、预计算文本 embedding 和单 GPU 推理。
 """
 
 from __future__ import annotations
@@ -129,6 +128,17 @@ def save_tensor(path: Path, tensor, metadata: dict[str, Any]) -> None:
     metadata["tensors"][path.name] = tensor_stats(cpu_tensor)
 
 
+def parse_block_ids(value: str) -> set[int]:
+    """解析逗号分隔的 block 编号，并拒绝超出 32 层模型范围的值。"""
+    if not value.strip():
+        return set()
+    block_ids = {int(item.strip()) for item in value.split(",")}
+    invalid = sorted(index for index in block_ids if index < 0 or index >= 32)
+    if invalid:
+        raise argparse.ArgumentTypeError(f"block id must be in [0, 31], got {invalid}")
+    return block_ids
+
+
 def read_video_cv2(video_path: Path):
     import cv2
     import torch
@@ -180,6 +190,23 @@ def main() -> int:
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--cfg-rescale", type=float, default=0.0)
     parser.add_argument("--sample-steps", type=int, default=1)
+    parser.add_argument(
+        "--dit-dtype",
+        choices=("bfloat16", "float32"),
+        default="bfloat16",
+        help="DiT weight/input precision; VAE reference remains bfloat16",
+    )
+    parser.add_argument(
+        "--dump-all-blocks",
+        action="store_true",
+        help="save inputs and outputs for all 32 DiT blocks",
+    )
+    parser.add_argument(
+        "--deep-blocks",
+        type=parse_block_ids,
+        default=parse_block_ids("0,9,10,31"),
+        help="comma-separated blocks whose attention internals are saved",
+    )
     args = parser.parse_args()
 
     install_runtime_fallbacks()
@@ -233,6 +260,9 @@ def main() -> int:
         "cfg_scale": args.cfg_scale,
         "cfg_rescale": args.cfg_rescale,
         "sample_steps": args.sample_steps,
+        "dit_dtype": args.dit_dtype,
+        "dump_all_blocks": args.dump_all_blocks,
+        "deep_blocks": sorted(args.deep_blocks),
         "platform": platform.platform(),
         "python": sys.version,
         "torch": torch.__version__,
@@ -249,10 +279,10 @@ def main() -> int:
 
     runner = VideoDiffusionInfer(config)
     runner.configure_dit_model(device="cuda", checkpoint="./ckpts/seedvr2_ema_3b.pth")
-    # The 3B checkpoint loads as fp32 weights. RTX 5090 32GB cannot keep the
-    # full DiT plus fallback attention activations in fp32, so the reference
-    # run stores and executes DiT weights in bf16.
-    runner.dit.to(device=get_device(), dtype=torch.bfloat16)
+    # BF16 is the official inference path. FP32 is an additional conversion
+    # baseline used to separate NCNN implementation errors from BF16 rounding.
+    dit_dtype = torch.bfloat16 if args.dit_dtype == "bfloat16" else torch.float32
+    runner.dit.to(device=get_device(), dtype=dit_dtype)
     runner.configure_vae_model()
     # Keep the small reference case on the VAE basic causal-conv path. The
     # memory-limited slicing path queries distributed sequence-parallel ranks.
@@ -261,6 +291,12 @@ def main() -> int:
     runner.configure_diffusion()
     runner.dit.eval()
     runner.vae.eval()
+    metadata["dit_runtime"] = {
+        "block_count": len(runner.dit.blocks),
+        "output_ada_layers": list(runner.dit.vid_out_ada.layers),
+        "output_ada_dim": int(runner.dit.vid_out_ada.dim),
+        "output_ada_emb_dim": int(runner.dit.vid_out_ada.emb_dim),
+    }
 
     video_raw, fps = read_video_cv2(args.video)
     metadata["input_video"] = {"fps": fps, **tensor_stats(video_raw)}
@@ -324,8 +360,19 @@ def main() -> int:
     save_tensor(out_dir / "text_pos_shape.pt", text_pos_shape, metadata)
     save_tensor(out_dir / "text_neg_shape.pt", text_neg_shape, metadata)
 
-    block_dump_ids = {0, 15, 31}
+    # 前 10 层使用独立 vid/txt 权重，后续层共享权重，第 31 层又是 vid-only
+    # MLP。0/9/10/31 因而覆盖全部结构分支，15 保留为整网中段检查点。
+    block_dump_ids = set(range(32)) if args.dump_all_blocks else {0, 15, 31}
     hook_handles = []
+    capture_context = {"tag": "inactive"}
+
+    def capture_path(name: str) -> Path:
+        """把正负文本分支和 sampler step 编入文件名，避免 hook 结果互相覆盖。"""
+        return out_dir / f"{capture_context['tag']}_{name}.pt"
+
+    def save_capture(name: str, tensor) -> None:
+        if capture_context["tag"] != "inactive":
+            save_tensor(capture_path(name), tensor, metadata)
 
     def make_block_hook(index: int):
         def hook(module, inputs, kwargs, output):
@@ -333,39 +380,117 @@ def main() -> int:
             vid_in, txt_in = kwargs["vid"], kwargs["txt"]
             vid_out, txt_out = output[0], output[1]
             prefix = f"block_{index:02d}"
-            save_tensor(out_dir / f"{prefix}_input_vid.pt", vid_in, metadata)
-            save_tensor(out_dir / f"{prefix}_input_txt.pt", txt_in, metadata)
-            save_tensor(out_dir / f"{prefix}_output_vid.pt", vid_out, metadata)
-            save_tensor(out_dir / f"{prefix}_output_txt.pt", txt_out, metadata)
+            save_capture(f"{prefix}_input_vid", vid_in)
+            save_capture(f"{prefix}_input_txt", txt_in)
+            save_capture(f"{prefix}_output_vid", vid_out)
+            save_capture(f"{prefix}_output_txt", txt_out)
         return hook
+
+    def make_mm_hook(index: int, name: str):
+        """保存 MMModule 的 vid/txt 双分支输出。"""
+        def hook(module, inputs, output):
+            del module, inputs
+            save_capture(f"block_{index:02d}_{name}_vid", output[0])
+            save_capture(f"block_{index:02d}_{name}_txt", output[1])
+        return hook
+
+    def make_attention_hook(index: int):
+        """保存 RoPE 后真正送入 varlen attention 的张量和分段边界。"""
+        def hook(module, inputs, kwargs, output):
+            del module, inputs
+            prefix = f"block_{index:02d}_attention"
+            for name in ("q", "k", "v", "cu_seqlens_q", "cu_seqlens_k"):
+                save_capture(f"{prefix}_{name}", kwargs[name])
+            save_capture(f"{prefix}_output", output)
+        return hook
+
+    def patch_input_hook(module, inputs, output):
+        del module, inputs
+        save_capture("patch_in_output_vid", output[0])
+        save_capture("patch_in_output_shape", output[1])
+
+    def text_input_hook(module, inputs, output):
+        del module, inputs
+        save_capture("text_in_output", output)
+
+    def time_embedding_hook(module, inputs, output):
+        del module, inputs
+        save_capture("time_embedding", output)
+
+    def output_ada_pre_hook(module, inputs, kwargs):
+        """在原地 mul/add 前克隆输入，并保存 Ada 实际选择的调制向量。"""
+        save_capture("output_ada_input_vid", inputs[0].clone())
+        embedding = kwargs["emb"]
+        save_capture("output_ada_input_embedding", embedding)
+        layer_index = module.layers.index("out")
+        modulation = rearrange(
+            embedding,
+            "b (d l g) -> b d l g",
+            l=len(module.layers),
+            g=3,
+        )[..., layer_index, :]
+        save_capture("output_ada_modulation", modulation)
+
+    def output_ada_hook(module, inputs, kwargs, output):
+        del module, inputs, kwargs
+        save_capture("output_ada_output_vid", output)
+
+    def patch_output_hook(module, inputs, output):
+        del module, inputs
+        save_capture("patch_out_output_vid", output[0])
+        save_capture("patch_out_output_shape", output[1])
+
+    hook_handles.append(runner.dit.vid_in.register_forward_hook(patch_input_hook))
+    hook_handles.append(runner.dit.txt_in.register_forward_hook(text_input_hook))
+    hook_handles.append(runner.dit.emb_in.register_forward_hook(time_embedding_hook))
+    hook_handles.append(
+        runner.dit.vid_out_ada.register_forward_pre_hook(output_ada_pre_hook, with_kwargs=True)
+    )
+    hook_handles.append(
+        runner.dit.vid_out_ada.register_forward_hook(output_ada_hook, with_kwargs=True)
+    )
+    hook_handles.append(runner.dit.vid_out.register_forward_hook(patch_output_hook))
 
     for idx, block in enumerate(runner.dit.blocks):
         if idx in block_dump_ids:
             hook_handles.append(block.register_forward_hook(make_block_hook(idx), with_kwargs=True))
+        if idx in args.deep_blocks:
+            hook_handles.append(block.attn.proj_qkv.register_forward_hook(make_mm_hook(idx, "qkv")))
+            hook_handles.append(block.attn.norm_q.register_forward_hook(make_mm_hook(idx, "norm_q")))
+            hook_handles.append(block.attn.norm_k.register_forward_hook(make_mm_hook(idx, "norm_k")))
+            hook_handles.append(block.attn.attn.register_forward_hook(make_attention_hook(idx), with_kwargs=True))
+            hook_handles.append(block.attn.proj_out.register_forward_hook(make_mm_hook(idx, "attention_projected")))
 
     timesteps = runner.sampler.timesteps.timesteps
     x = latents
-    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+    with torch.no_grad(), torch.autocast(
+        "cuda", torch.bfloat16, enabled=args.dit_dtype == "bfloat16"
+    ):
         for step_index, t in enumerate(timesteps):
-            dit_input = torch.cat([x, latents_cond], dim=-1)
+            dit_input = torch.cat([x, latents_cond], dim=-1).to(dit_dtype)
+            text_pos_input = text_pos_flat.to(dit_dtype)
+            text_neg_input = text_neg_flat.to(dit_dtype)
             save_tensor(out_dir / f"dit_input_pos_step{step_index:03d}.pt", dit_input, metadata)
+            capture_context["tag"] = f"pos_step{step_index:03d}"
             pos = runner.dit(
                 vid=dit_input,
-                txt=text_pos_flat,
+                txt=text_pos_input,
                 vid_shape=latents_shape,
                 txt_shape=text_pos_shape,
                 timestep=t.repeat(1),
             ).vid_sample
             save_tensor(out_dir / f"dit_output_pos_step{step_index:03d}.pt", pos, metadata)
 
+            capture_context["tag"] = f"neg_step{step_index:03d}"
             neg = runner.dit(
                 vid=dit_input,
-                txt=text_neg_flat,
+                txt=text_neg_input,
                 vid_shape=latents_shape,
                 txt_shape=text_neg_shape,
                 timestep=t.repeat(1),
             ).vid_sample
             save_tensor(out_dir / f"dit_output_neg_step{step_index:03d}.pt", neg, metadata)
+            capture_context["tag"] = "inactive"
 
             pred = classifier_free_guidance(pos, neg, scale=args.cfg_scale, rescale=args.cfg_rescale)
             save_tensor(out_dir / f"cfg_output_step{step_index:03d}.pt", pred, metadata)
