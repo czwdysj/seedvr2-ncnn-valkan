@@ -208,13 +208,6 @@ build/seedvr2_cli \
 `[T,H,W,C]`，之后是 FP32 THWC。正式项目可在 app 层接入 FFmpeg/OpenCV；媒体容器、
 颜色空间和音频复用不应耦合进推理库。
 
-仓库提供了一个可直接运行的 16×16 NCNN 图标最小样例，详见
-[`example/min_test/README.md`](example/min_test/README.md)：
-
-```bash
-SEEDVR2_THREADS=8 ./example/min_test/run_min_test.sh
-```
-
 ## 已完成验证
 
 本次重构后的实测结果：
