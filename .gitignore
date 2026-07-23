@@ -38,3 +38,8 @@ __pycache__
 /cpp_runtime/build/
 /cmake-build-*/
 /third_party/
+
+# Minimal example runtime outputs.
+/example/min_test/output.f32
+/example/min_test/output.ppm
+/example/min_test/output.png
