@@ -72,24 +72,42 @@ struct TextEmbedding
 class SeedVR2Engine
 {
 public:
+    // 构造时只创建一个空的内部实现对象，不加载任何模型文件。
+    // 真正的 NCNN Net、采样器和运行时选项都在 load() 成功后才可用。
     SeedVR2Engine();
+
+    // 析构函数定义在 .cpp 中，避免公开头文件需要看到 Impl 的完整定义。
     ~SeedVR2Engine();
 
+    // Engine 持有模型和运行时状态，禁止复制以避免多个对象共享同一套 NCNN 资源。
+    // 允许移动，便于调用方把已加载的 Engine 放入容器或从工厂函数返回。
     SeedVR2Engine(SeedVR2Engine&&) noexcept;
     SeedVR2Engine& operator=(SeedVR2Engine&&) noexcept;
     SeedVR2Engine(const SeedVR2Engine&) = delete;
     SeedVR2Engine& operator=(const SeedVR2Engine&) = delete;
 
+    // 加载模型目录并初始化运行时。model_dir 可以是总目录，也可以直接指向包含
+    // VAE/DiT param 和 bin 的目录；实现会优先查找 vae_dynamic 和 dit_full_fp16 子目录。
+    // 返回 0 表示成功，非 0 对应 Status；详细错误可通过 last_error() 读取。
     int load(const std::string& model_dir, const RuntimeOptions& options = {});
+
+    // 执行一次 SeedVR2 处理：
+    // input: THWC、RGB、FP32、[0,1] 视频；
+    // positive/negative: 预计算文本 embedding，布局为 [tokens,5120]；
+    // output: 成功后写入 THWC、RGB、FP32、[0,1] 的结果视频。
     int process(const Video& input,
                 const TextEmbedding& positive,
                 const TextEmbedding& negative,
                 Video& output);
 
+    // 返回当前对象是否已经成功 load()。process() 前应为 true。
     bool loaded() const noexcept;
+
+    // 返回最近一次 load()/process() 失败留下的阶段化错误信息。
     const std::string& last_error() const noexcept;
 
 private:
+    // PIMPL：把 NCNN、VAE、DiT、自定义层和采样器等内部实现细节从公开 ABI 中隔离。
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
