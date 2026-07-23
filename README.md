@@ -112,7 +112,7 @@ apps/seedvr2_cli.cpp      命令行入口
 tests/                    分层和完整推理 runner
 tools/                    导出、转换和数值对齐脚本
 docs/                     转换及自定义层报告
-pytorch_model/            SeedVR2 PyTorch 参考代码
+pytorch_model/            本地可选的 SeedVR2 PyTorch 参考代码（Git 忽略）
 ```
 
 ## 构建

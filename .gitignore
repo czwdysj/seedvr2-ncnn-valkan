@@ -32,6 +32,7 @@ __pycache__
 /pnnx_export/
 /ncnn_models/
 /learn_pnnx/out/
+/pytorch_model/
 
 # Local build and downloaded dependency workspaces.
 /build/
