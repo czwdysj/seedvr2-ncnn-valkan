@@ -1,0 +1,54 @@
+// 本文件是可独立阅读的 ReLU Vulkan compute shader 教学版。
+// 输入和输出共享 binding=0 的 storage buffer，每个 invocation 原位处理一个 vec4；
+// slope 是创建 Pipeline 时固定的参数，n 是每次 dispatch 时传入的动态工作量。
+#version 450
+
+// 每个 workgroup 启动 64 个 invocation；正式 NCNN 会依据设备选择合适的 local size。
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// constant_id=0 对应 C++ specializations[0]，创建 Pipeline 后保持不变。
+layout(constant_id = 0) const float slope = 0.0;
+
+// constant_id=1 对应 C++ specializations[1]，静态形状已知时可直接使用。
+layout(constant_id = 1) const uint specialized_n = 0;
+
+// binding=0 对应 C++ bindings[0]；buffer 同时可读可写以支持 inplace。
+layout(set = 0, binding = 0, std430) buffer BottomTopBlob
+{
+    // 一个 vec4 对应四个连续 FP32 标量。
+    vec4 values[];
+} bottom_top_blob;
+
+// Push constant 不需要单独分配 descriptor buffer，适合少量动态参数。
+layout(push_constant) uniform Parameter
+{
+    // 本次输入包含的 vec4 数量。
+    uint n;
+} parameter;
+
+// Vulkan 为每个 invocation 调用一次 main()。
+void main()
+{
+    // gl_GlobalInvocationID.x 是当前 invocation 对应的一维全局索引。
+    const uint index = gl_GlobalInvocationID.x;
+
+    // 静态 n 非零时使用 specialization 值，否则使用本次 push constant。
+    const uint element_count = specialized_n != 0 ? specialized_n : parameter.n;
+
+    // dispatch 通常向上取整到 workgroup 的整数倍，因此尾部线程必须越界保护。
+    if (index >= element_count)
+        return;
+
+    // 从 storage buffer 一次读取四个标量到寄存器。
+    vec4 value = bottom_top_blob.values[index];
+
+    // slope=0 时执行普通 ReLU。
+    if (slope == 0.0)
+        value = max(value, vec4(0.0));
+    // slope 非零时对负分量乘 slope，正分量保持不变。
+    else
+        value = mix(value, value * slope, lessThan(value, vec4(0.0)));
+
+    // 将计算结果写回同一个 storage buffer，完成 inplace 操作。
+    bottom_top_blob.values[index] = value;
+}

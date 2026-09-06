@@ -14,49 +14,49 @@
 
 namespace
 {
-ncnn::Layer* load_inner_product(
-    const ncnn::ModelBin& mb,
-    int input_size,
-    int output_size,
-    bool bias)
-{
-    ncnn::Layer* layer = ncnn::create_layer("InnerProduct");
-    if (!layer)
-        return nullptr;
-    ncnn::ParamDict pd;
-    pd.set(0, output_size);
-    pd.set(1, bias ? 1 : 0);
-    pd.set(2, input_size * output_size);
-    if (layer->load_param(pd) != 0 || layer->load_model(mb) != 0)
+    ncnn::Layer *load_inner_product(
+        const ncnn::ModelBin &mb,
+        int input_size,
+        int output_size,
+        bool bias)
     {
-        delete layer;
-        return nullptr;
+        ncnn::Layer *layer = ncnn::create_layer("InnerProduct");
+        if (!layer)
+            return nullptr;
+        ncnn::ParamDict pd;
+        pd.set(0, output_size);
+        pd.set(1, bias ? 1 : 0);
+        pd.set(2, input_size * output_size);
+        if (layer->load_param(pd) != 0 || layer->load_model(mb) != 0)
+        {
+            delete layer;
+            return nullptr;
+        }
+        return layer;
     }
-    return layer;
-}
 
-inline float silu(float value)
-{
-    return value / (1.f + std::exp(-value));
-}
+    inline float silu(float value)
+    {
+        return value / (1.f + std::exp(-value));
+    }
 
-inline int ceil_div(int value, int divisor)
-{
-    return (value + divisor - 1) / divisor;
-}
+    inline int ceil_div(int value, int divisor)
+    {
+        return (value + divisor - 1) / divisor;
+    }
 
-inline float round_to_bfloat16(float value)
-{
-    // PyTorch 在调用 SDPA 前显式执行 .bfloat16()。这里采用 round-to-nearest
-    // ties-to-even 后再以 FP32 保存，既复现数值又保持 NCNN Mat 的 FP32 ABI。
-    uint32_t bits;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t least_significant = (bits >> 16) & 1u;
-    bits += 0x7fffu + least_significant;
-    bits &= 0xffff0000u;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
+    inline float round_to_bfloat16(float value)
+    {
+        // PyTorch 在调用 SDPA 前显式执行 .bfloat16()。这里采用 round-to-nearest
+        // ties-to-even 后再以 FP32 保存，既复现数值又保持 NCNN Mat 的 FP32 ABI。
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const uint32_t least_significant = (bits >> 16) & 1u;
+        bits += 0x7fffu + least_significant;
+        bits &= 0xffff0000u;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
 } // namespace
 
 SeedVR2DiTBlock::SeedVR2DiTBlock()
@@ -82,7 +82,7 @@ SeedVR2DiTBlock::~SeedVR2DiTBlock()
         destroy_branch(txt_weights);
 }
 
-void SeedVR2DiTBlock::destroy_branch(BranchWeights& branch)
+void SeedVR2DiTBlock::destroy_branch(BranchWeights &branch)
 {
     delete branch.qkv;
     delete branch.proj_out;
@@ -96,7 +96,7 @@ void SeedVR2DiTBlock::destroy_branch(BranchWeights& branch)
     branch.mlp_out_proj = nullptr;
 }
 
-int SeedVR2DiTBlock::load_param(const ncnn::ParamDict& pd)
+int SeedVR2DiTBlock::load_param(const ncnn::ParamDict &pd)
 {
     block_index = pd.get(0, 0);
     shared_weights = pd.get(1, 0) != 0;
@@ -110,7 +110,7 @@ int SeedVR2DiTBlock::load_param(const ncnn::ParamDict& pd)
     return dim == heads * head_dim ? 0 : -1;
 }
 
-int SeedVR2DiTBlock::load_branch(const ncnn::ModelBin& mb, BranchWeights& branch)
+int SeedVR2DiTBlock::load_branch(const ncnn::ModelBin &mb, BranchWeights &branch)
 {
     branch.attn_shift = mb.load(dim, 1);
     branch.attn_scale = mb.load(dim, 1);
@@ -118,8 +118,7 @@ int SeedVR2DiTBlock::load_branch(const ncnn::ModelBin& mb, BranchWeights& branch
     branch.mlp_shift = mb.load(dim, 1);
     branch.mlp_scale = mb.load(dim, 1);
     branch.mlp_gate = mb.load(dim, 1);
-    if (branch.attn_shift.empty() || branch.attn_scale.empty() || branch.attn_gate.empty()
-        || branch.mlp_shift.empty() || branch.mlp_scale.empty() || branch.mlp_gate.empty())
+    if (branch.attn_shift.empty() || branch.attn_scale.empty() || branch.attn_gate.empty() || branch.mlp_shift.empty() || branch.mlp_scale.empty() || branch.mlp_gate.empty())
         return -100;
 
     branch.qkv = load_inner_product(mb, dim, dim * 3, false);
@@ -129,13 +128,12 @@ int SeedVR2DiTBlock::load_branch(const ncnn::ModelBin& mb, BranchWeights& branch
     branch.mlp_gate_proj = load_inner_product(mb, dim, mlp_hidden, false);
     branch.mlp_in_proj = load_inner_product(mb, dim, mlp_hidden, false);
     branch.mlp_out_proj = load_inner_product(mb, mlp_hidden, dim, false);
-    if (!branch.qkv || !branch.proj_out || branch.norm_q.empty() || branch.norm_k.empty()
-        || !branch.mlp_gate_proj || !branch.mlp_in_proj || !branch.mlp_out_proj)
+    if (!branch.qkv || !branch.proj_out || branch.norm_q.empty() || branch.norm_k.empty() || !branch.mlp_gate_proj || !branch.mlp_in_proj || !branch.mlp_out_proj)
         return -100;
     return 0;
 }
 
-int SeedVR2DiTBlock::load_model(const ncnn::ModelBin& mb)
+int SeedVR2DiTBlock::load_model(const ncnn::ModelBin &mb)
 {
     if (load_branch(mb, vid_weights) != 0)
         return -100;
@@ -145,11 +143,12 @@ int SeedVR2DiTBlock::load_model(const ncnn::ModelBin& mb)
     return rope_freqs.empty() ? -100 : 0;
 }
 
-int SeedVR2DiTBlock::create_pipeline(const ncnn::Option& opt)
+int SeedVR2DiTBlock::create_pipeline(const ncnn::Option &opt)
 {
-    auto create_branch = [&](BranchWeights& branch) {
-        for (ncnn::Layer* layer : {branch.qkv, branch.proj_out, branch.mlp_gate_proj,
-                                  branch.mlp_in_proj, branch.mlp_out_proj})
+    auto create_branch = [&](BranchWeights &branch)
+    {
+        for (ncnn::Layer *layer : {branch.qkv, branch.proj_out, branch.mlp_gate_proj,
+                                   branch.mlp_in_proj, branch.mlp_out_proj})
         {
             if (layer && layer->create_pipeline(opt) != 0)
                 return -1;
@@ -161,11 +160,12 @@ int SeedVR2DiTBlock::create_pipeline(const ncnn::Option& opt)
     return shared_weights ? 0 : create_branch(txt_weights);
 }
 
-int SeedVR2DiTBlock::destroy_pipeline(const ncnn::Option& opt)
+int SeedVR2DiTBlock::destroy_pipeline(const ncnn::Option &opt)
 {
-    auto destroy = [&](BranchWeights& branch) {
-        for (ncnn::Layer* layer : {branch.qkv, branch.proj_out, branch.mlp_gate_proj,
-                                  branch.mlp_in_proj, branch.mlp_out_proj})
+    auto destroy = [&](BranchWeights &branch)
+    {
+        for (ncnn::Layer *layer : {branch.qkv, branch.proj_out, branch.mlp_gate_proj,
+                                   branch.mlp_in_proj, branch.mlp_out_proj})
             if (layer)
                 layer->destroy_pipeline(opt);
     };
@@ -175,11 +175,11 @@ int SeedVR2DiTBlock::destroy_pipeline(const ncnn::Option& opt)
     return 0;
 }
 
-void SeedVR2DiTBlock::apply_rmsnorm(ncnn::Mat& value) const
+void SeedVR2DiTBlock::apply_rmsnorm(ncnn::Mat &value) const
 {
     for (int row = 0; row < value.h; row++)
     {
-        float* data = value.row(row);
+        float *data = value.row(row);
         double square_sum = 0.0;
         for (int channel = 0; channel < dim; channel++)
             square_sum += static_cast<double>(data[channel]) * data[channel];
@@ -190,47 +190,45 @@ void SeedVR2DiTBlock::apply_rmsnorm(ncnn::Mat& value) const
 }
 
 void SeedVR2DiTBlock::apply_ada_input(
-    ncnn::Mat& value,
-    const ncnn::Mat& embedding,
-    const ncnn::Mat& shift,
-    const ncnn::Mat& scale,
+    ncnn::Mat &value,
+    const ncnn::Mat &embedding,
+    const ncnn::Mat &shift,
+    const ncnn::Mat &scale,
     int layer_index) const
 {
-    const float* emb = embedding;
-    const float* shift_b = shift;
-    const float* scale_b = scale;
+    const float *emb = embedding;
+    const float *shift_b = shift;
+    const float *scale_b = scale;
     const int slot = layer_index * 3;
 #pragma omp parallel for
     for (int row = 0; row < value.h; row++)
     {
-        float* data = value.row(row);
+        float *data = value.row(row);
         for (int channel = 0; channel < dim; channel++)
         {
             const int offset = channel * 6 + slot;
-            data[channel] = data[channel] * (emb[offset + 1] + scale_b[channel])
-                + emb[offset] + shift_b[channel];
+            data[channel] = data[channel] * (emb[offset + 1] + scale_b[channel]) + emb[offset] + shift_b[channel];
         }
     }
 }
 
 void SeedVR2DiTBlock::apply_ada_output_and_residual(
-    ncnn::Mat& value,
-    const ncnn::Mat& residual,
-    const ncnn::Mat& embedding,
-    const ncnn::Mat& gate,
+    ncnn::Mat &value,
+    const ncnn::Mat &residual,
+    const ncnn::Mat &embedding,
+    const ncnn::Mat &gate,
     int layer_index) const
 {
-    const float* emb = embedding;
-    const float* gate_b = gate;
+    const float *emb = embedding;
+    const float *gate_b = gate;
     const int slot = layer_index * 3 + 2;
 #pragma omp parallel for
     for (int row = 0; row < value.h; row++)
     {
-        float* data = value.row(row);
-        const float* skip = residual.row(row);
+        float *data = value.row(row);
+        const float *skip = residual.row(row);
         for (int channel = 0; channel < dim; channel++)
-            data[channel] = data[channel] * (emb[channel * 6 + slot] + gate_b[channel])
-                + skip[channel];
+            data[channel] = data[channel] * (emb[channel * 6 + slot] + gate_b[channel]) + skip[channel];
     }
 }
 
@@ -251,14 +249,14 @@ std::vector<SeedVR2DiTBlock::Window> SeedVR2DiTBlock::make_windows(
     const double shift_h = shifted_window && window_height < height ? 0.5 : 0.0;
     const double shift_w = shifted_window && window_width < width ? 0.5 : 0.0;
     int count_t = shifted_window
-        ? (shift_t > 0.0 ? static_cast<int>(std::ceil((frames - shift_t) / window_frames)) + 1 : 1)
-        : ceil_div(frames, window_frames);
+                      ? (shift_t > 0.0 ? static_cast<int>(std::ceil((frames - shift_t) / window_frames)) + 1 : 1)
+                      : ceil_div(frames, window_frames);
     int count_h = shifted_window
-        ? (shift_h > 0.0 ? static_cast<int>(std::ceil((height - shift_h) / window_height)) + 1 : 1)
-        : ceil_div(height, window_height);
+                      ? (shift_h > 0.0 ? static_cast<int>(std::ceil((height - shift_h) / window_height)) + 1 : 1)
+                      : ceil_div(height, window_height);
     int count_w = shifted_window
-        ? (shift_w > 0.0 ? static_cast<int>(std::ceil((width - shift_w) / window_width)) + 1 : 1)
-        : ceil_div(width, window_width);
+                      ? (shift_w > 0.0 ? static_cast<int>(std::ceil((width - shift_w) / window_width)) + 1 : 1)
+                      : ceil_div(width, window_width);
 
     std::vector<Window> windows;
     for (int iw = 0; iw < count_w; iw++)
@@ -278,18 +276,18 @@ std::vector<SeedVR2DiTBlock::Window> SeedVR2DiTBlock::make_windows(
 }
 
 int SeedVR2DiTBlock::attention(
-    const ncnn::Mat& vid_qkv,
-    const ncnn::Mat& txt_qkv,
-    const ncnn::Mat& vid_shape,
-    const BranchWeights& vid_branch,
-    const BranchWeights& txt_branch,
-    ncnn::Mat& vid_output,
-    ncnn::Mat& txt_output,
-    const ncnn::Option& opt) const
+    const ncnn::Mat &vid_qkv,
+    const ncnn::Mat &txt_qkv,
+    const ncnn::Mat &vid_shape,
+    const BranchWeights &vid_branch,
+    const BranchWeights &txt_branch,
+    ncnn::Mat &vid_output,
+    ncnn::Mat &txt_output,
+    const ncnn::Option &opt) const
 {
-    const int frames = static_cast<const int*>(vid_shape)[0];
-    const int height = static_cast<const int*>(vid_shape)[1];
-    const int width = static_cast<const int*>(vid_shape)[2];
+    const int frames = static_cast<const int *>(vid_shape)[0];
+    const int height = static_cast<const int *>(vid_shape)[1];
+    const int width = static_cast<const int *>(vid_shape)[2];
     if (frames * height * width != vid_qkv.h)
         return -1;
     const int text_length = txt_qkv.h;
@@ -304,7 +302,7 @@ int SeedVR2DiTBlock::attention(
     vid_output.fill(0.f);
     txt_output.fill(0.f);
     const float attention_scale = 1.f / std::sqrt(static_cast<float>(head_dim));
-    const float* frequencies = rope_freqs;
+    const float *frequencies = rope_freqs;
 
     // 每个 head 独占自己的输出通道，窗口在同一 head 内顺序执行，避免文本
     // 汇聚产生写冲突；视频窗口本身是分区，每个 token 只写一次。
@@ -312,7 +310,7 @@ int SeedVR2DiTBlock::attention(
     for (int head = 0; head < heads; head++)
     {
         std::vector<float> text_accumulator(static_cast<size_t>(text_length) * head_dim, 0.f);
-        for (const Window& window : windows)
+        for (const Window &window : windows)
         {
             const int local_t = window.t1 - window.t0;
             const int local_h = window.h1 - window.h0;
@@ -326,9 +324,10 @@ int SeedVR2DiTBlock::attention(
             std::vector<float> v(static_cast<size_t>(sequence_length) * head_dim);
             std::vector<float> scores(sequence_length);
 
-            auto normalize_and_rotate = [&](const float* source, const float* gamma,
-                                            float* destination, int position_t,
-                                            int position_h, int position_w) {
+            auto normalize_and_rotate = [&](const float *source, const float *gamma,
+                                            float *destination, int position_t,
+                                            int position_h, int position_w)
+            {
                 double square_sum = 0.0;
                 for (int d = 0; d < head_dim; d++)
                     square_sum += static_cast<double>(source[d]) * source[d];
@@ -359,7 +358,7 @@ int SeedVR2DiTBlock::attention(
                     {
                         const int index = (t * height + y) * width + x;
                         video_indices.push_back(index);
-                        const float* row = vid_qkv.row(index);
+                        const float *row = vid_qkv.row(index);
                         normalize_and_rotate(
                             row + head * head_dim,
                             vid_branch.norm_q,
@@ -374,13 +373,13 @@ int SeedVR2DiTBlock::attention(
                             v.data() + static_cast<size_t>(token) * head_dim,
                             row + dim * 2 + head * head_dim,
                             static_cast<size_t>(head_dim) * sizeof(float));
-                        float* value = v.data() + static_cast<size_t>(token) * head_dim;
+                        float *value = v.data() + static_cast<size_t>(token) * head_dim;
                         for (int d = 0; d < head_dim; d++)
                             value[d] = round_to_bfloat16(value[d]);
                     }
             for (int text = 0; text < text_length; text++, token++)
             {
-                const float* row = txt_qkv.row(text);
+                const float *row = txt_qkv.row(text);
                 normalize_and_rotate(
                     row + head * head_dim,
                     txt_branch.norm_q,
@@ -395,18 +394,18 @@ int SeedVR2DiTBlock::attention(
                     v.data() + static_cast<size_t>(token) * head_dim,
                     row + dim * 2 + head * head_dim,
                     static_cast<size_t>(head_dim) * sizeof(float));
-                float* value = v.data() + static_cast<size_t>(token) * head_dim;
+                float *value = v.data() + static_cast<size_t>(token) * head_dim;
                 for (int d = 0; d < head_dim; d++)
                     value[d] = round_to_bfloat16(value[d]);
             }
 
             for (int query = 0; query < sequence_length; query++)
             {
-                const float* query_data = q.data() + static_cast<size_t>(query) * head_dim;
+                const float *query_data = q.data() + static_cast<size_t>(query) * head_dim;
                 float maximum = -std::numeric_limits<float>::infinity();
                 for (int key = 0; key < sequence_length; key++)
                 {
-                    const float* key_data = k.data() + static_cast<size_t>(key) * head_dim;
+                    const float *key_data = k.data() + static_cast<size_t>(key) * head_dim;
                     double dot = 0.0;
                     for (int d = 0; d < head_dim; d++)
                         dot += static_cast<double>(query_data[d]) * key_data[d];
@@ -414,23 +413,21 @@ int SeedVR2DiTBlock::attention(
                     maximum = std::max(maximum, scores[key]);
                 }
                 float denominator = 0.f;
-                for (float& score : scores)
+                for (float &score : scores)
                 {
                     score = std::exp(score - maximum);
                     denominator += score;
                 }
-                float* destination = nullptr;
+                float *destination = nullptr;
                 if (query < video_length)
                     destination = vid_output.row(video_indices[query]) + head * head_dim;
                 else
-                    destination = text_accumulator.data()
-                        + static_cast<size_t>(query - video_length) * head_dim;
+                    destination = text_accumulator.data() + static_cast<size_t>(query - video_length) * head_dim;
                 for (int d = 0; d < head_dim; d++)
                 {
                     double sum = 0.0;
                     for (int key = 0; key < sequence_length; key++)
-                        sum += static_cast<double>(scores[key] / denominator)
-                            * v[static_cast<size_t>(key) * head_dim + d];
+                        sum += static_cast<double>(scores[key] / denominator) * v[static_cast<size_t>(key) * head_dim + d];
                     destination[d] += round_to_bfloat16(static_cast<float>(sum));
                 }
             }
@@ -438,8 +435,8 @@ int SeedVR2DiTBlock::attention(
         const float inverse_window_count = 1.f / windows.size();
         for (int text = 0; text < text_length; text++)
         {
-            float* destination = txt_output.row(text) + head * head_dim;
-            const float* source = text_accumulator.data() + static_cast<size_t>(text) * head_dim;
+            float *destination = txt_output.row(text) + head * head_dim;
+            const float *source = text_accumulator.data() + static_cast<size_t>(text) * head_dim;
             for (int d = 0; d < head_dim; d++)
                 destination[d] = source[d] * inverse_window_count;
         }
@@ -448,21 +445,20 @@ int SeedVR2DiTBlock::attention(
 }
 
 int SeedVR2DiTBlock::apply_mlp(
-    const ncnn::Mat& input,
-    const BranchWeights& branch,
-    ncnn::Mat& output,
-    const ncnn::Option& opt) const
+    const ncnn::Mat &input,
+    const BranchWeights &branch,
+    ncnn::Mat &output,
+    const ncnn::Option &opt) const
 {
     ncnn::Mat gate;
     ncnn::Mat value;
-    if (branch.mlp_gate_proj->forward(input, gate, opt) != 0
-        || branch.mlp_in_proj->forward(input, value, opt) != 0)
+    if (branch.mlp_gate_proj->forward(input, gate, opt) != 0 || branch.mlp_in_proj->forward(input, value, opt) != 0)
         return -100;
 #pragma omp parallel for num_threads(opt.num_threads)
     for (int row = 0; row < gate.h; row++)
     {
-        float* gate_data = gate.row(row);
-        const float* value_data = value.row(row);
+        float *gate_data = gate.row(row);
+        const float *value_data = value.row(row);
         for (int channel = 0; channel < mlp_hidden; channel++)
             gate_data[channel] = silu(gate_data[channel]) * value_data[channel];
     }
@@ -470,9 +466,9 @@ int SeedVR2DiTBlock::apply_mlp(
 }
 
 int SeedVR2DiTBlock::forward(
-    const std::vector<ncnn::Mat>& bottom_blobs,
-    std::vector<ncnn::Mat>& top_blobs,
-    const ncnn::Option& opt) const
+    const std::vector<ncnn::Mat> &bottom_blobs,
+    std::vector<ncnn::Mat> &top_blobs,
+    const ncnn::Option &opt) const
 {
     if (bottom_blobs.size() != 4 || top_blobs.size() != 2)
     {
@@ -480,12 +476,11 @@ int SeedVR2DiTBlock::forward(
                      block_index, bottom_blobs.size(), top_blobs.size());
         return -1;
     }
-    const ncnn::Mat& vid = bottom_blobs[0];
-    const ncnn::Mat& txt = bottom_blobs[1];
-    const ncnn::Mat& embedding = bottom_blobs[2];
-    const ncnn::Mat& vid_shape = bottom_blobs[3];
-    if (vid.dims != 2 || txt.dims != 2 || vid.w != dim || txt.w != dim
-        || embedding.w != dim * 6 || vid_shape.dims != 1 || vid_shape.w != 3)
+    const ncnn::Mat &vid = bottom_blobs[0];
+    const ncnn::Mat &txt = bottom_blobs[1];
+    const ncnn::Mat &embedding = bottom_blobs[2];
+    const ncnn::Mat &vid_shape = bottom_blobs[3];
+    if (vid.dims != 2 || txt.dims != 2 || vid.w != dim || txt.w != dim || embedding.w != dim * 6 || vid_shape.dims != 1 || vid_shape.w != 3)
     {
         std::fprintf(
             stderr,
@@ -495,7 +490,7 @@ int SeedVR2DiTBlock::forward(
             embedding.total(), vid_shape.total(), dim);
         return -1;
     }
-    const BranchWeights& text_branch = shared_weights ? vid_weights : txt_weights;
+    const BranchWeights &text_branch = shared_weights ? vid_weights : txt_weights;
 
     ncnn::Mat vid_attention_input = vid.clone(opt.blob_allocator);
     ncnn::Mat txt_attention_input = txt.clone(opt.blob_allocator);
@@ -550,8 +545,8 @@ int SeedVR2DiTBlock::forward(
 #pragma omp parallel for num_threads(opt.num_threads)
         for (int row = 0; row < txt_projected.h; row++)
         {
-            float* data = txt_projected.row(row);
-            const float* skip = txt.row(row);
+            float *data = txt_projected.row(row);
+            const float *skip = txt.row(row);
             for (int channel = 0; channel < dim; channel++)
                 data[channel] += skip[channel];
         }
@@ -582,7 +577,7 @@ int SeedVR2DiTBlock::forward(
 #pragma omp parallel for num_threads(opt.num_threads)
         for (int row = 0; row < txt_last.h; row++)
         {
-            float* data = txt_last.row(row);
+            float *data = txt_last.row(row);
             for (int channel = 0; channel < dim; channel++)
                 data[channel] *= 2.f;
         }
