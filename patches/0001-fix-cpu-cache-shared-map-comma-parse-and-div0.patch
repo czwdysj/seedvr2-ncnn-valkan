@@ -1,0 +1,30 @@
+diff --git a/src/cpu.cpp b/src/cpu.cpp
+index 86c44708..5ab36d47 100644
+--- a/src/cpu.cpp
++++ b/src/cpu.cpp
+@@ -1154,6 +1154,13 @@ static int get_data_cache_size(int cpuid, int level)
+         for (int i = len - 1; i >= 0; i--)
+         {
+             char x = shared_cpu_map_str[i];
++            // Linux sysfs 的 bitmap 以逗号分隔 32 位十六进制组（如
++            // "00000000,00000001,000000ff"）。逗号不是数据位，跳过且不推进
++            // 位偏移，否则逗号会被当十六进制字符解析，并在跨越组边界后
++            // 使所有位错位（多核服务器上进一步导致共享核数统计为 0，
++            // 触发下方除零崩溃，见 test_demo 与 docs/server_dev_zh.md）。
++            if (x == ',')
++                continue;
+             if (x & 1) shared_cpu_map.enable(ci + 0);
+             if (x & 2) shared_cpu_map.enable(ci + 1);
+             if (x & 4) shared_cpu_map.enable(ci + 2);
+@@ -1201,6 +1208,11 @@ static int get_data_cache_size(int cpuid, int level)
+     }
+ 
+     // return per-physical-core cache size with 4K aligned
++    // 防御：若 thread_siblings 全部解析失败（虚拟化/容器环境常见），
++    // 共享核数会停留在 0，直接除法会触发 SIGFPE；此时按未共享口径返回。
++    if (shared_physical_cpu_count <= 0)
++        return cache_size_K * 1024;
++
+     cache_size_K = (cache_size_K / shared_physical_cpu_count + 3) / 4 * 4;
+ 
+     return cache_size_K * 1024;
