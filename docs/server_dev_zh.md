@@ -112,4 +112,10 @@ git push /root/repos/seedvr2_ncnn.git main   # 服务器侧产生的提交
   `dpkg-deb -x` 手工解包方案；
 - 2026-09-06：直接层调用 ncnn 自定义层时，Option 必须显式
   `use_packing_layout=false`，否则 Reshape 输出 packed blob（ep=8），
-  与 `RuntimeContext` 的标量布局契约一致（见 test_demo 实验）。
+  与 `RuntimeContext` 的标量布局契约一致（见 test_demo 实验）；
+- 2026-09-06：384 核服务器上 `ncnn::Option` 构造触发 SIGFPE——ncnn
+  `cpu.cpp get_data_cache_size()` 无法解析逗号分组的 shared_cpu_map 且
+  缺少共享核数为 0 的防御。已修复并以
+  `patches/0001-fix-cpu-cache-shared-map-comma-parse-and-div0.patch` 入库，
+  服务器与 WSL 的 ncnn 树均需应用该补丁（修复后服务器单测通过）；
+  待向 ncnn 上游提交。
