@@ -80,4 +80,12 @@ if(SEEDVR2_BUILD_TESTS)
     add_executable(seedvr2_dit_full_runner tests/dit_full_runner.cpp)
     target_include_directories(seedvr2_dit_full_runner PRIVATE src)
     target_link_libraries(seedvr2_dit_full_runner PRIVATE seedvr2_ncnn)
+
+    # Vulkan 自定义层数值对齐测试：仅在开启 Vulkan 时编译，避免 CPU 构建失败。
+    if(SEEDVR2_ENABLE_VULKAN)
+        add_executable(seedvr2_shuffle_vulkan_runner tests/shuffle_vulkan_runner.cpp)
+        target_include_directories(seedvr2_shuffle_vulkan_runner PRIVATE custom_layers)
+        target_link_libraries(seedvr2_shuffle_vulkan_runner PRIVATE seedvr2_ncnn)
+        add_test(NAME seedvr2_shuffle_vulkan_runner COMMAND seedvr2_shuffle_vulkan_runner)
+    endif()
 endif()
