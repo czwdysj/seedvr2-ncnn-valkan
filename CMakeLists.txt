@@ -45,8 +45,13 @@ target_include_directories(
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/custom_layers)
 target_link_libraries(seedvr2_ncnn PUBLIC ncnn)
-# 当前值是一个有意的能力闸门：只有六个 layer 都具备 Vulkan 实现后才能改为 1。
-target_compile_definitions(seedvr2_ncnn PRIVATE SEEDVR2_CUSTOM_LAYERS_VULKAN=0)
+# 六个自定义层均已实现 forward_vkcompute，能力闸门随 Vulkan 构建开关打开；
+# 未开启 Vulkan 构建时保持 0，运行时仍拒绝 Vulkan 后端。
+if(SEEDVR2_ENABLE_VULKAN)
+    target_compile_definitions(seedvr2_ncnn PRIVATE SEEDVR2_CUSTOM_LAYERS_VULKAN=1)
+else()
+    target_compile_definitions(seedvr2_ncnn PRIVATE SEEDVR2_CUSTOM_LAYERS_VULKAN=0)
+endif()
 
 if(SEEDVR2_BUILD_APPS)
     add_executable(seedvr2_cli apps/seedvr2_cli.cpp)

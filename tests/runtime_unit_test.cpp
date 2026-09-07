@@ -83,9 +83,18 @@ int main()
 
     seedvr2::RuntimeOptions vulkan_options;
     vulkan_options.device = seedvr2::DeviceType::Vulkan;
+#if NCNN_VULKAN
+    // 六个自定义层均已实现 forward_vkcompute，Vulkan 后端应通过能力闸门，
+    // 在模型目录缺失时返回 ModelNotFound（而非 UnsupportedBackend）。
+    if (engine.load("/path/that/does/not/exist", vulkan_options)
+        != static_cast<int>(seedvr2::Status::ModelNotFound))
+        return fail("Engine did not accept the Vulkan backend after the capability gate opened");
+#else
+    // 未开启 Vulkan 的构建仍需拒绝 Vulkan 后端。
     if (engine.load("/path/that/does/not/exist", vulkan_options)
         != static_cast<int>(seedvr2::Status::UnsupportedBackend))
-        return fail("Engine did not enforce the custom-layer Vulkan capability gate");
+        return fail("Engine did not reject the Vulkan backend in a CPU-only build");
+#endif
 
     std::cout << "runtime unit tests passed\n";
     return 0;
