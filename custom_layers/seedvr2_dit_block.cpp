@@ -3,6 +3,12 @@
 // T/H/W 生成普通或 shifted 窗口、视频/文本联合 MM-RoPE attention、AdaSingle
 // 调制、残差和 SwiGLU 调度。该实现首先用于逐层数值基线，Vulkan 路径会复用
 // 完全相同的窗口索引和权重布局，避免 CPU/GPU 两套语义发生偏差。
+//
+// Vulkan 路径：5 个矩阵乘投影复用 InnerProduct（Layer_final 委托），自定义
+// 代码负责 7 个 compute shader——rmsnorm_reduce/rmsnorm_apply（逐 token RMSNorm
+// + adaLN 调制，reduce+apply 两段）、qkv_prepare（MM-RoPE 旋转 + bf16 舍入）、
+// attention（softmax 三遍 QK^T，不物化 scores）、ada_residual（门控残差）、
+// silu（SwiGLU 门控）、text_normalize（文本跨窗口平均）。
 #include "seedvr2_dit_block.h"
 
 #include <algorithm>
@@ -12,17 +18,29 @@
 #include <cstring>
 #include <limits>
 
+#if NCNN_VULKAN
+#include <gpu.h>
+#include <vector>
+#endif
+
 namespace
 {
     ncnn::Layer *load_inner_product(
         const ncnn::ModelBin &mb,
         int input_size,
         int output_size,
-        bool bias)
+        bool bias,
+        const ncnn::VulkanDevice *vkdev)
     {
         ncnn::Layer *layer = ncnn::create_layer("InnerProduct");
         if (!layer)
             return nullptr;
+#if NCNN_VULKAN
+        // 关键：必须在 load_param 之前设置 vkdev。Layer_final::load_param 里若
+        // vkdev 为空会把 layer_vulkan 删除（fallback 到 CPU），之后无法走 Vulkan。
+        if (vkdev)
+            layer->vkdev = vkdev;
+#endif
         ncnn::ParamDict pd;
         pd.set(0, output_size);
         pd.set(1, bias ? 1 : 0);
@@ -59,6 +77,476 @@ namespace
     }
 } // namespace
 
+#if NCNN_VULKAN
+
+// ============================================================================
+// shader 1：rmsnorm_reduce —— 逐 token 平方和归约
+// ============================================================================
+// 与 DiTOutput 的 norm_reduce 同构：每个 workgroup 处理一个 token，strided
+// 累加 + shared-memory 树形归约，统计量用 fp32 避免半精度累积误差。
+static const char* block_rmsnorm_reduce_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) readonly buffer bottom_data { sfp bottom_blob[]; };
+layout(binding = 1, std430) writeonly buffer sqsum_data { float sqsum_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint dim;
+    uint tokens;
+} p;
+
+shared float sqsum_shared[256];
+
+void main()
+{
+    uint token = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint nthreads = gl_WorkGroupSize.x;
+    if (token >= p.tokens)
+        return;
+
+    float local_sqsum = 0.0;
+    for (uint c = tid; c < p.dim; c += nthreads)
+    {
+        float v = buffer_ld1(bottom_blob, token * p.dim + c);
+        local_sqsum += v * v;
+    }
+    sqsum_shared[tid] = local_sqsum;
+    barrier();
+    for (uint s = nthreads / 2u; s > 0u; s >>= 1u)
+    {
+        if (tid < s)
+            sqsum_shared[tid] += sqsum_shared[tid + s];
+        barrier();
+    }
+    if (tid == 0u)
+        sqsum_blob[token] = sqsum_shared[0];
+}
+)VKGLSL";
+
+// ============================================================================
+// shader 2：rmsnorm_apply —— 逐 token RMSNorm + adaLN 输入调制
+// ============================================================================
+// 融合 apply_rmsnorm（无 gamma）与 apply_ada_input：
+//   result = data * (inverse_rms * (emb[c*6+slot+1] + scale[c])) + (emb[c*6+slot] + shift[c])
+// has_ada=0 时退化为纯 RMSNorm（last_layer 的文本分支只做 RMSNorm）。
+static const char* block_rmsnorm_apply_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) readonly buffer bottom_data { sfp bottom_blob[]; };
+layout(binding = 1, std430) writeonly buffer top_data { sfp top_blob[]; };
+layout(binding = 2, std430) readonly buffer scale_data { sfp scale_blob[]; };
+layout(binding = 3, std430) readonly buffer shift_data { sfp shift_blob[]; };
+layout(binding = 4, std430) readonly buffer emb_data { sfp emb_blob[]; };
+layout(binding = 5, std430) readonly buffer sqsum_data { float sqsum_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint dim;
+    float eps;
+    uint slot;
+    uint has_ada;
+    uint total;
+} p;
+
+void main()
+{
+    uint gi = gl_GlobalInvocationID.x;
+    if (gi >= p.total)
+        return;
+    uint c = gi % p.dim;
+    uint token = gi / p.dim;
+
+    float inv_rms = 1.0 / sqrt(sqsum_blob[token] / float(p.dim) + p.eps);
+    afp v = buffer_ld1(bottom_blob, token * p.dim + c);
+
+    afp result;
+    if (p.has_ada == 0u)
+    {
+        result = v * inv_rms;
+    }
+    else
+    {
+        afp s = buffer_ld1(scale_blob, c);
+        afp sh = buffer_ld1(shift_blob, c);
+        afp e0 = buffer_ld1(emb_blob, c * 6u + p.slot);
+        afp e1 = buffer_ld1(emb_blob, c * 6u + p.slot + 1u);
+        result = v * (inv_rms * (e1 + s)) + (e0 + sh);
+    }
+    buffer_st1(top_blob, token * p.dim + c, result);
+}
+)VKGLSL";
+
+// ============================================================================
+// shader 3：qkv_prepare —— Q/K/V 的 RMSNorm + MM-RoPE 旋转 + bf16 舍入
+// ============================================================================
+// 每个 work item 处理一个 (head, token)，串行遍历 head_dim 维。token 分两类：
+//   - 视频 token（token < video_length）：源是 vid_qkv，RoPE 位置为窗口内相对
+//     坐标 (text_length + t_local, y_local, x_local)；
+//   - 文本 token（token >= video_length）：源是 txt_qkv，RoPE 位置为 (text,text,text)。
+//
+// q/k 流程：head_dim 维 RMSNorm → 乘 norm_q/norm_k 的 gamma → MM-RoPE 旋转前
+// 126 维（3 axis × 21 pair × 2）→ bf16 舍入。v 只做 bf16 舍入。
+static const char* block_qkv_prepare_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) readonly buffer vid_qkv_data { sfp vid_qkv_blob[]; };
+layout(binding = 1, std430) readonly buffer txt_qkv_data { sfp txt_qkv_blob[]; };
+layout(binding = 2, std430) writeonly buffer q_data { sfp q_blob[]; };
+layout(binding = 3, std430) writeonly buffer k_data { sfp k_blob[]; };
+layout(binding = 4, std430) writeonly buffer v_data { sfp v_blob[]; };
+layout(binding = 5, std430) readonly buffer norm_q_data { sfp norm_q_blob[]; };
+layout(binding = 6, std430) readonly buffer norm_k_data { sfp norm_k_blob[]; };
+layout(binding = 7, std430) readonly buffer freqs_data { float freqs_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint heads;
+    uint head_dim;
+    uint seq;
+    uint video_length;
+    uint text_length;
+    uint local_h;
+    uint local_w;
+    uint h0;
+    uint w0;
+    uint t0;
+    uint height;
+    uint width;
+    uint dim;
+    float eps;
+    uint total;
+} p;
+
+float bf16(float value)
+{
+    uint bits = floatBitsToUint(value);
+    uint ls = (bits >> 16u) & 1u;
+    bits += 0x7fffu + ls;
+    bits &= 0xffff0000u;
+    return uintBitsToFloat(bits);
+}
+
+void main()
+{
+    uint gi = gl_GlobalInvocationID.x;
+    if (gi >= p.total)
+        return;
+    uint head = gi / p.seq;
+    uint token = gi % p.seq;
+
+    // 解码源 token 索引与 RoPE 位置。
+    uint src_token;
+    uint pos_t, pos_h, pos_w;
+    bool is_text = token >= p.video_length;
+    if (is_text)
+    {
+        uint text = token - p.video_length;
+        src_token = text;
+        pos_t = text; pos_h = text; pos_w = text;
+    }
+    else
+    {
+        uint local_wh = p.local_h * p.local_w;
+        uint t_local = token / local_wh;
+        uint yx = token % local_wh;
+        uint y_local = yx / p.local_w;
+        uint x_local = yx % p.local_w;
+        uint t = p.t0 + t_local;
+        uint y = p.h0 + y_local;
+        uint x = p.w0 + x_local;
+        src_token = (t * p.height + y) * p.width + x;
+        pos_t = p.text_length + t_local;
+        pos_h = y_local;
+        pos_w = x_local;
+    }
+
+    // 源基地址（vid_qkv/txt_qkv 均为 [*, dim*3]，q/k/v 各占 dim 段）。
+    uint src_base = src_token * (p.dim * 3u) + head * p.head_dim;
+    uint q_src = src_base;
+    uint k_src = src_base + p.dim;
+    uint v_src = src_base + p.dim * 2u;
+
+    // 阶段一：q/k 的 head_dim 维平方和（RMSNorm 的 reduce）。
+    float q_sqsum = 0.0;
+    float k_sqsum = 0.0;
+    for (uint d = 0u; d < p.head_dim; d++)
+    {
+        float qv = is_text ? buffer_ld1(txt_qkv_blob, q_src + d) : buffer_ld1(vid_qkv_blob, q_src + d);
+        float kv = is_text ? buffer_ld1(txt_qkv_blob, k_src + d) : buffer_ld1(vid_qkv_blob, k_src + d);
+        q_sqsum += qv * qv;
+        k_sqsum += kv * kv;
+    }
+    float q_inv = 1.0 / sqrt(q_sqsum / float(p.head_dim) + p.eps);
+    float k_inv = 1.0 / sqrt(k_sqsum / float(p.head_dim) + p.eps);
+
+    // 阶段二：归一化 + gamma，暂存到局部数组（RoPE 需要全部 head_dim 维）。
+    float q_local[128];
+    float k_local[128];
+    for (uint d = 0u; d < p.head_dim; d++)
+    {
+        float qv = is_text ? buffer_ld1(txt_qkv_blob, q_src + d) : buffer_ld1(vid_qkv_blob, q_src + d);
+        float kv = is_text ? buffer_ld1(txt_qkv_blob, k_src + d) : buffer_ld1(vid_qkv_blob, k_src + d);
+        q_local[d] = qv * q_inv * buffer_ld1(norm_q_blob, d);
+        k_local[d] = kv * k_inv * buffer_ld1(norm_k_blob, d);
+    }
+
+    // 阶段三：MM-RoPE 旋转前 3*42 维（3 轴 × 21 对 × 2）。
+    for (uint axis = 0u; axis < 3u; axis++)
+    {
+        float pos = (axis == 0u) ? float(pos_t) : ((axis == 1u) ? float(pos_h) : float(pos_w));
+        for (uint pair = 0u; pair < 21u; pair++)
+        {
+            uint d = axis * 42u + pair * 2u;
+            if (d + 1u >= p.head_dim)
+                break;
+            float angle = pos * freqs_blob[pair];
+            float cosine = cos(angle);
+            float sine = sin(angle);
+            float f0 = q_local[d], f1 = q_local[d + 1u];
+            q_local[d] = f0 * cosine - f1 * sine;
+            q_local[d + 1u] = f1 * cosine + f0 * sine;
+            f0 = k_local[d]; f1 = k_local[d + 1u];
+            k_local[d] = f0 * cosine - f1 * sine;
+            k_local[d + 1u] = f1 * cosine + f0 * sine;
+        }
+    }
+
+    // 阶段四：bf16 舍入后写出 q/k/v。
+    uint out_base = (head * p.seq + token) * p.head_dim;
+    for (uint d = 0u; d < p.head_dim; d++)
+    {
+        float vv = is_text ? buffer_ld1(txt_qkv_blob, v_src + d) : buffer_ld1(vid_qkv_blob, v_src + d);
+        buffer_st1(q_blob, out_base + d, bf16(q_local[d]));
+        buffer_st1(k_blob, out_base + d, bf16(k_local[d]));
+        buffer_st1(v_blob, out_base + d, bf16(vv));
+    }
+}
+)VKGLSL";
+
+// ============================================================================
+// shader 4：attention —— softmax(QK^T * scale) @ V，三遍 QK^T 不物化 scores
+// ============================================================================
+// 每个 work item 处理一个 (head, query)。三遍遍历 key：
+//   ① 找 max（softmax 数值稳定）；② 算 sum(exp)；③ 加权累加 v。
+// 视频 query 结果写 vid_out_ws 的当前窗口段（shifted 窗口时跨窗口累加由
+// window_sum 统一完成）；文本 query 结果写 txt_out_ws 的当前窗口段。
+static const char* block_attention_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) readonly buffer q_data { sfp q_blob[]; };
+layout(binding = 1, std430) readonly buffer k_data { sfp k_blob[]; };
+layout(binding = 2, std430) readonly buffer v_data { sfp v_blob[]; };
+layout(binding = 3, std430) writeonly buffer vid_out_data { sfp vid_out_blob[]; };
+layout(binding = 4, std430) writeonly buffer txt_out_data { sfp txt_out_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint head_dim;
+    uint seq;
+    uint video_length;
+    uint text_length;
+    uint video_tokens;
+    uint local_h;
+    uint local_w;
+    uint h0;
+    uint w0;
+    uint t0;
+    uint height;
+    uint width;
+    uint dim;
+    uint window_index;
+    float scale;
+    uint total;
+} p;
+
+void main()
+{
+    uint gi = gl_GlobalInvocationID.x;
+    if (gi >= p.total)
+        return;
+    uint head = gi / p.seq;
+    uint query = gi % p.seq;
+
+    uint q_base = (head * p.seq + query) * p.head_dim;
+
+    // 第一遍：找 max。
+    float maximum = -1.0e30;
+    for (uint key = 0u; key < p.seq; key++)
+    {
+        uint k_base = (head * p.seq + key) * p.head_dim;
+        float dot = 0.0;
+        for (uint d = 0u; d < p.head_dim; d++)
+            dot += buffer_ld1(q_blob, q_base + d) * buffer_ld1(k_blob, k_base + d);
+        float s = dot * p.scale;
+        if (s > maximum)
+            maximum = s;
+    }
+
+    // 第二遍：算 sum(exp)。
+    float denominator = 0.0;
+    for (uint key = 0u; key < p.seq; key++)
+    {
+        uint k_base = (head * p.seq + key) * p.head_dim;
+        float dot = 0.0;
+        for (uint d = 0u; d < p.head_dim; d++)
+            dot += buffer_ld1(q_blob, q_base + d) * buffer_ld1(k_blob, k_base + d);
+        denominator += exp(dot * p.scale - maximum);
+    }
+
+    // 第三遍：加权累加 v。
+    float acc[128];
+    for (uint d = 0u; d < p.head_dim; d++)
+        acc[d] = 0.0;
+    for (uint key = 0u; key < p.seq; key++)
+    {
+        uint k_base = (head * p.seq + key) * p.head_dim;
+        float dot = 0.0;
+        for (uint d = 0u; d < p.head_dim; d++)
+            dot += buffer_ld1(q_blob, q_base + d) * buffer_ld1(k_blob, k_base + d);
+        float w = exp(dot * p.scale - maximum) / denominator;
+        for (uint d = 0u; d < p.head_dim; d++)
+            acc[d] += w * buffer_ld1(v_blob, k_base + d);
+    }
+
+    // 写出结果到当前窗口段。
+    if (query < p.video_length)
+    {
+        // 解码窗口内视频 token 的全局 flat 索引。
+        uint local_wh = p.local_h * p.local_w;
+        uint t_local = query / local_wh;
+        uint yx = query % local_wh;
+        uint y_local = yx / p.local_w;
+        uint x_local = yx % p.local_w;
+        uint global_index = ((p.t0 + t_local) * p.height + (p.h0 + y_local)) * p.width + (p.w0 + x_local);
+        uint out_base = p.window_index * (p.video_tokens * p.dim) + global_index * p.dim + head * p.head_dim;
+        for (uint d = 0u; d < p.head_dim; d++)
+            buffer_st1(vid_out_blob, out_base + d, acc[d]);
+    }
+    else
+    {
+        uint text = query - p.video_length;
+        uint out_base = p.window_index * (p.text_length * p.dim) + text * p.dim + head * p.head_dim;
+        for (uint d = 0u; d < p.head_dim; d++)
+            buffer_st1(txt_out_blob, out_base + d, acc[d]);
+    }
+}
+)VKGLSL";
+
+// ============================================================================
+// shader 5：ada_residual —— 输出调制（门控残差 / 普通残差 / 两倍，三模式）
+// ============================================================================
+//   mode=0（门控残差）：result = data * (emb[c*6 + slot] + gate[c]) + residual[c]
+//   mode=1（普通残差）：result = data + residual[c]（last_layer 文本跳过 gate）
+//   mode=2（两倍）    ：result = data * 2（last_layer 文本的 2*txt_attn 语义）
+static const char* block_ada_residual_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) buffer data { sfp data_blob[]; };
+layout(binding = 1, std430) readonly buffer residual_data { sfp residual_blob[]; };
+layout(binding = 2, std430) readonly buffer gate_data { sfp gate_blob[]; };
+layout(binding = 3, std430) readonly buffer emb_data { sfp emb_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint dim;
+    uint slot;
+    uint mode;
+    uint total;
+} p;
+
+void main()
+{
+    uint gi = gl_GlobalInvocationID.x;
+    if (gi >= p.total)
+        return;
+    uint c = gi % p.dim;
+    uint token = gi / p.dim;
+
+    afp d = buffer_ld1(data_blob, token * p.dim + c);
+    afp result;
+    if (p.mode == 0u)
+    {
+        afp r = buffer_ld1(residual_blob, token * p.dim + c);
+        afp g = buffer_ld1(gate_blob, c);
+        afp e = buffer_ld1(emb_blob, c * 6u + p.slot);
+        result = d * (e + g) + r;
+    }
+    else if (p.mode == 1u)
+    {
+        afp r = buffer_ld1(residual_blob, token * p.dim + c);
+        result = d + r;
+    }
+    else
+    {
+        result = d * 2.0;
+    }
+    buffer_st1(data_blob, token * p.dim + c, result);
+}
+)VKGLSL";
+
+// ============================================================================
+// shader 6：silu —— SwiGLU 门控（in-place）
+// ============================================================================
+// gate[i] = silu(gate[i]) * value[i]
+static const char* block_silu_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) buffer gate_data { sfp gate_blob[]; };
+layout(binding = 1, std430) readonly buffer value_data { sfp value_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint total;
+} p;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.total)
+        return;
+    afp g = buffer_ld1(gate_blob, i);
+    afp v = buffer_ld1(value_blob, i);
+    buffer_st1(gate_blob, i, (g / (1.0 + exp(-g))) * v);
+}
+)VKGLSL";
+
+// ============================================================================
+// shader 7：window_sum —— 跨窗口归约（视频累加 / 文本平均）
+// ============================================================================
+// src 布局 [windows, tokens, dim]，每个 work item 处理一个 (token, channel)，
+// 累加 windows 个窗口段；has_divide=1 时除以 windows（文本平均），否则直接累加
+// （视频 shifted 窗口的跨窗口累加）。
+static const char* block_window_sum_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) readonly buffer src_data { sfp src_blob[]; };
+layout(binding = 1, std430) writeonly buffer dst_data { sfp dst_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint dim;
+    uint tokens;
+    uint windows;
+    uint has_divide;
+    uint total;
+} p;
+
+void main()
+{
+    uint gi = gl_GlobalInvocationID.x;
+    if (gi >= p.total)
+        return;
+    uint channel = gi % p.dim;
+    uint token = gi / p.dim;
+
+    float sum = 0.0;
+    for (uint w = 0u; w < p.windows; w++)
+    {
+        uint idx = w * (p.tokens * p.dim) + token * p.dim + channel;
+        sum += buffer_ld1(src_blob, idx);
+    }
+    afp result = (p.has_divide == 1u) ? afp(sum / float(p.windows)) : afp(sum);
+    buffer_st1(dst_blob, token * p.dim + channel, result);
+}
+)VKGLSL";
+
+#endif // NCNN_VULKAN
+
 SeedVR2DiTBlock::SeedVR2DiTBlock()
     : block_index(0),
       shared_weights(false),
@@ -73,6 +561,17 @@ SeedVR2DiTBlock::SeedVR2DiTBlock()
     one_blob_only = false;
     support_inplace = false;
     support_packing = false;
+#if NCNN_VULKAN
+    support_vulkan = true;
+    support_vulkan_packing = false;
+    pipeline_rmsnorm_reduce = 0;
+    pipeline_rmsnorm_apply = 0;
+    pipeline_qkv_prepare = 0;
+    pipeline_attention = 0;
+    pipeline_ada_residual = 0;
+    pipeline_silu = 0;
+    pipeline_text_normalize = 0;
+#endif
 }
 
 SeedVR2DiTBlock::~SeedVR2DiTBlock()
@@ -121,13 +620,13 @@ int SeedVR2DiTBlock::load_branch(const ncnn::ModelBin &mb, BranchWeights &branch
     if (branch.attn_shift.empty() || branch.attn_scale.empty() || branch.attn_gate.empty() || branch.mlp_shift.empty() || branch.mlp_scale.empty() || branch.mlp_gate.empty())
         return -100;
 
-    branch.qkv = load_inner_product(mb, dim, dim * 3, false);
-    branch.proj_out = load_inner_product(mb, dim, dim, true);
+    branch.qkv = load_inner_product(mb, dim, dim * 3, false, vkdev);
+    branch.proj_out = load_inner_product(mb, dim, dim, true, vkdev);
     branch.norm_q = mb.load(head_dim, 1);
     branch.norm_k = mb.load(head_dim, 1);
-    branch.mlp_gate_proj = load_inner_product(mb, dim, mlp_hidden, false);
-    branch.mlp_in_proj = load_inner_product(mb, dim, mlp_hidden, false);
-    branch.mlp_out_proj = load_inner_product(mb, mlp_hidden, dim, false);
+    branch.mlp_gate_proj = load_inner_product(mb, dim, mlp_hidden, false, vkdev);
+    branch.mlp_in_proj = load_inner_product(mb, dim, mlp_hidden, false, vkdev);
+    branch.mlp_out_proj = load_inner_product(mb, mlp_hidden, dim, false, vkdev);
     if (!branch.qkv || !branch.proj_out || branch.norm_q.empty() || branch.norm_k.empty() || !branch.mlp_gate_proj || !branch.mlp_in_proj || !branch.mlp_out_proj)
         return -100;
     return 0;
@@ -150,14 +649,50 @@ int SeedVR2DiTBlock::create_pipeline(const ncnn::Option &opt)
         for (ncnn::Layer *layer : {branch.qkv, branch.proj_out, branch.mlp_gate_proj,
                                    branch.mlp_in_proj, branch.mlp_out_proj})
         {
-            if (layer && layer->create_pipeline(opt) != 0)
+            if (!layer)
+                return -1;
+#if NCNN_VULKAN
+            if (vkdev)
+                layer->vkdev = vkdev;
+#endif
+            if (layer->create_pipeline(opt) != 0)
                 return -1;
         }
         return 0;
     };
     if (create_branch(vid_weights) != 0)
         return -1;
-    return shared_weights ? 0 : create_branch(txt_weights);
+    if (!shared_weights && create_branch(txt_weights) != 0)
+        return -1;
+
+#if NCNN_VULKAN
+    if (!vkdev)
+        return 0;
+
+    auto compile = [&](const char* source, ncnn::Pipeline*& pipeline, int local_x, const char* name) {
+        std::vector<uint32_t> spirv;
+        const int ret = ncnn::compile_spirv_module(source, opt, spirv);
+        if (ret != 0)
+        {
+            std::fprintf(stderr, "SeedVR2DiTBlock[%d]: %s compile failed %d\n", block_index, name, ret);
+            return ret;
+        }
+        pipeline = new ncnn::Pipeline(vkdev);
+        pipeline->set_optimal_local_size_xyz(local_x, 1, 1);
+        pipeline->create(spirv.data(), spirv.size() * sizeof(uint32_t), std::vector<ncnn::vk_specialization_type>());
+        return 0;
+    };
+
+    int ret;
+    if ((ret = compile(block_rmsnorm_reduce_shader_source, pipeline_rmsnorm_reduce, 256, "rmsnorm_reduce")) != 0) return ret;
+    if ((ret = compile(block_rmsnorm_apply_shader_source, pipeline_rmsnorm_apply, 64, "rmsnorm_apply")) != 0) return ret;
+    if ((ret = compile(block_qkv_prepare_shader_source, pipeline_qkv_prepare, 64, "qkv_prepare")) != 0) return ret;
+    if ((ret = compile(block_attention_shader_source, pipeline_attention, 64, "attention")) != 0) return ret;
+    if ((ret = compile(block_ada_residual_shader_source, pipeline_ada_residual, 64, "ada_residual")) != 0) return ret;
+    if ((ret = compile(block_silu_shader_source, pipeline_silu, 64, "silu")) != 0) return ret;
+    if ((ret = compile(block_window_sum_shader_source, pipeline_text_normalize, 64, "window_sum")) != 0) return ret;
+#endif
+    return 0;
 }
 
 int SeedVR2DiTBlock::destroy_pipeline(const ncnn::Option &opt)
@@ -172,6 +707,16 @@ int SeedVR2DiTBlock::destroy_pipeline(const ncnn::Option &opt)
     destroy(vid_weights);
     if (!shared_weights)
         destroy(txt_weights);
+
+#if NCNN_VULKAN
+    delete pipeline_rmsnorm_reduce; pipeline_rmsnorm_reduce = 0;
+    delete pipeline_rmsnorm_apply; pipeline_rmsnorm_apply = 0;
+    delete pipeline_qkv_prepare; pipeline_qkv_prepare = 0;
+    delete pipeline_attention; pipeline_attention = 0;
+    delete pipeline_ada_residual; pipeline_ada_residual = 0;
+    delete pipeline_silu; pipeline_silu = 0;
+    delete pipeline_text_normalize; pipeline_text_normalize = 0;
+#endif
     return 0;
 }
 
@@ -599,5 +1144,402 @@ int SeedVR2DiTBlock::forward(
     top_blobs[1] = txt_mlp;
     return 0;
 }
+
+#if NCNN_VULKAN
+
+int SeedVR2DiTBlock::upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt)
+{
+    // 上传一个分支的 8 个调制权重 + 5 个投影层的权重（InnerProduct 各自 upload）。
+    auto upload_branch = [&](BranchWeights& branch) {
+        cmd.record_upload(branch.attn_shift, branch.attn_shift_gpu, opt);
+        cmd.record_upload(branch.attn_scale, branch.attn_scale_gpu, opt);
+        cmd.record_upload(branch.attn_gate, branch.attn_gate_gpu, opt);
+        cmd.record_upload(branch.mlp_shift, branch.mlp_shift_gpu, opt);
+        cmd.record_upload(branch.mlp_scale, branch.mlp_scale_gpu, opt);
+        cmd.record_upload(branch.mlp_gate, branch.mlp_gate_gpu, opt);
+        cmd.record_upload(branch.norm_q, branch.norm_q_gpu, opt);
+        cmd.record_upload(branch.norm_k, branch.norm_k_gpu, opt);
+        for (ncnn::Layer* layer : {branch.qkv, branch.proj_out, branch.mlp_gate_proj,
+                                   branch.mlp_in_proj, branch.mlp_out_proj})
+        {
+            if (layer && layer->upload_model(cmd, opt) != 0)
+            {
+                std::fprintf(stderr, "SeedVR2DiTBlock[%d]: sublayer upload_model failed\n", block_index);
+                return -1;
+            }
+        }
+        return 0;
+    };
+    if (upload_branch(vid_weights) != 0)
+        return -1;
+    if (!shared_weights && upload_branch(txt_weights) != 0)
+        return -1;
+    cmd.record_upload(rope_freqs, rope_freqs_gpu, opt);
+    return 0;
+}
+
+int SeedVR2DiTBlock::forward(
+    const std::vector<ncnn::VkMat>& bottom_blobs,
+    std::vector<ncnn::VkMat>& top_blobs,
+    ncnn::VkCompute& cmd,
+    const ncnn::Option& opt) const
+{
+    if (bottom_blobs.size() != 4 || top_blobs.size() != 2)
+        return -1;
+    const ncnn::VkMat& vid = bottom_blobs[0];
+    const ncnn::VkMat& txt = bottom_blobs[1];
+    const ncnn::VkMat& embedding = bottom_blobs[2];
+    const ncnn::VkMat& vid_shape = bottom_blobs[3];
+    if (vid.dims != 2 || vid.w != dim || txt.dims != 2 || txt.w != dim
+        || embedding.w != dim * 6 || vid_shape.w != 3)
+        return -1;
+
+    // shape 存 int 位模式，同步读取（同 DiTInput/DiTOutput）。
+    ncnn::Mat shape_cpu;
+    cmd.record_download(vid_shape, shape_cpu, opt);
+    cmd.submit_and_wait();
+    cmd.reset();
+    const int* shape_data = static_cast<const int*>(shape_cpu.data);
+    const int frames = shape_data[0];
+    const int height = shape_data[1];
+    const int width = shape_data[2];
+    if (frames <= 0 || height <= 0 || width <= 0 || vid.h != frames * height * width)
+        return -1;
+    const int video_tokens = frames * height * width;
+    const int text_length = txt.h;
+    const std::vector<Window> windows = make_windows(frames, height, width);
+    if (windows.empty())
+        return -1;
+    const int window_count = static_cast<int>(windows.size());
+    const BranchWeights& text_branch = shared_weights ? vid_weights : txt_weights;
+
+    // 最大窗口 seq（video + text），用于 workspace 分配。
+    int max_seq = 0;
+    for (const Window& w : windows)
+        max_seq = std::max(max_seq, (w.t1 - w.t0) * (w.h1 - w.h0) * (w.w1 - w.w0) + text_length);
+
+    // ========================================================================
+    // 辅助 lambda：rmsnorm_ada —— 逐 token RMSNorm + adaLN 输入调制（reduce+apply）
+    // ========================================================================
+    auto rmsnorm_ada = [&](const ncnn::VkMat& input, const ncnn::VkMat& scale_gpu,
+                           const ncnn::VkMat& shift_gpu, uint slot, uint has_ada,
+                           ncnn::VkMat& output) -> int
+    {
+        const int tokens = input.h;
+        ncnn::VkMat sqsum(tokens, 4u, 1, opt.workspace_vkallocator);
+        if (sqsum.empty())
+            return -100;
+        {
+            std::vector<ncnn::VkMat> bindings(2);
+            bindings[0] = input;
+            bindings[1] = sqsum;
+            std::vector<ncnn::vk_constant_type> constants(2);
+            constants[0].u32 = static_cast<uint32_t>(dim);
+            constants[1].u32 = static_cast<uint32_t>(tokens);
+            ncnn::VkMat dispatcher;
+            dispatcher.w = tokens * pipeline_rmsnorm_reduce->local_size_x();
+            dispatcher.h = 1;
+            dispatcher.c = 1;
+            cmd.record_pipeline(pipeline_rmsnorm_reduce, bindings, constants, dispatcher);
+        }
+        output.create(dim, tokens, 4u, 1, opt.workspace_vkallocator);
+        if (output.empty())
+            return -100;
+        {
+            std::vector<ncnn::VkMat> bindings(6);
+            bindings[0] = input;
+            bindings[1] = output;
+            bindings[2] = scale_gpu;
+            bindings[3] = shift_gpu;
+            bindings[4] = embedding;
+            bindings[5] = sqsum;
+            const uint32_t total = static_cast<uint32_t>(tokens) * dim;
+            std::vector<ncnn::vk_constant_type> constants(5);
+            constants[0].u32 = static_cast<uint32_t>(dim);
+            constants[1].f = norm_eps;
+            constants[2].u32 = slot;
+            constants[3].u32 = has_ada;
+            constants[4].u32 = total;
+            ncnn::VkMat dispatcher;
+            dispatcher.w = total;
+            dispatcher.h = 1;
+            dispatcher.c = 1;
+            cmd.record_pipeline(pipeline_rmsnorm_apply, bindings, constants, dispatcher);
+        }
+        return 0;
+    };
+
+    // ========================================================================
+    // 辅助 lambda：ada_residual —— 门控残差 / 普通残差 / 两倍
+    // ========================================================================
+    auto ada_residual = [&](ncnn::VkMat& data, const ncnn::VkMat& residual,
+                            const ncnn::VkMat& gate_gpu, uint slot, uint mode) -> int
+    {
+        const int tokens = data.h;
+        std::vector<ncnn::VkMat> bindings(4);
+        bindings[0] = data;
+        bindings[1] = residual;
+        bindings[2] = gate_gpu;
+        bindings[3] = embedding;
+        const uint32_t total = static_cast<uint32_t>(tokens) * dim;
+        std::vector<ncnn::vk_constant_type> constants(4);
+        constants[0].u32 = static_cast<uint32_t>(dim);
+        constants[1].u32 = slot;
+        constants[2].u32 = mode;
+        constants[3].u32 = total;
+        ncnn::VkMat dispatcher;
+        dispatcher.w = total;
+        dispatcher.h = 1;
+        dispatcher.c = 1;
+        cmd.record_pipeline(pipeline_ada_residual, bindings, constants, dispatcher);
+        return 0;
+    };
+
+    // ========================================================================
+    // 辅助 lambda：apply_mlp —— SwiGLU MLP（gate_proj + in_proj + silu + out_proj）
+    // ========================================================================
+    auto apply_mlp_gpu = [&](const ncnn::VkMat& input, const BranchWeights& branch,
+                             ncnn::VkMat& output) -> int
+    {
+        ncnn::VkMat gate;
+        ncnn::VkMat value;
+        if (branch.mlp_gate_proj->forward(input, gate, cmd, opt) != 0
+            || branch.mlp_in_proj->forward(input, value, cmd, opt) != 0)
+            return -100;
+        {
+            std::vector<ncnn::VkMat> bindings(2);
+            bindings[0] = gate;
+            bindings[1] = value;
+            const uint32_t total = static_cast<uint32_t>(gate.h) * mlp_hidden;
+            std::vector<ncnn::vk_constant_type> constants(1);
+            constants[0].u32 = total;
+            ncnn::VkMat dispatcher;
+            dispatcher.w = total;
+            dispatcher.h = 1;
+            dispatcher.c = 1;
+            cmd.record_pipeline(pipeline_silu, bindings, constants, dispatcher);
+        }
+        return branch.mlp_out_proj->forward(gate, output, cmd, opt);
+    };
+
+    // ========================================================================
+    // 阶段一：attention 输入准备（rmsnorm + adaLN 调制）
+    // ========================================================================
+    ncnn::VkMat vid_attn_in;
+    ncnn::VkMat txt_attn_in;
+    if (rmsnorm_ada(vid, vid_weights.attn_scale_gpu, vid_weights.attn_shift_gpu, 0, 1, vid_attn_in) != 0)
+        return -100;
+    if (rmsnorm_ada(txt, text_branch.attn_scale_gpu, text_branch.attn_shift_gpu, 0, last_layer ? 0 : 1, txt_attn_in) != 0)
+        return -100;
+
+    // ========================================================================
+    // 阶段二：QKV 投影（复用 InnerProduct）
+    // ========================================================================
+    ncnn::VkMat vid_qkv;
+    ncnn::VkMat txt_qkv;
+    if (vid_weights.qkv->forward(vid_attn_in, vid_qkv, cmd, opt) != 0
+        || text_branch.qkv->forward(txt_attn_in, txt_qkv, cmd, opt) != 0)
+        return -100;
+
+    // ========================================================================
+    // 阶段三：attention（逐窗口 dispatch qkv_prepare + attention）
+    // ========================================================================
+    // 跨窗口归约的 workspace：q/k/v 复用（每窗口覆盖），vid/txt 输出按窗口分段。
+    ncnn::VkMat q_ws(heads * max_seq * head_dim, 4u, 1, opt.workspace_vkallocator);
+    ncnn::VkMat k_ws(heads * max_seq * head_dim, 4u, 1, opt.workspace_vkallocator);
+    ncnn::VkMat v_ws(heads * max_seq * head_dim, 4u, 1, opt.workspace_vkallocator);
+    ncnn::VkMat vid_out_ws(window_count * video_tokens * dim, 4u, 1, opt.workspace_vkallocator);
+    ncnn::VkMat txt_out_ws(window_count * text_length * dim, 4u, 1, opt.workspace_vkallocator);
+    if (q_ws.empty() || k_ws.empty() || v_ws.empty() || vid_out_ws.empty() || txt_out_ws.empty())
+        return -100;
+
+    const float attention_scale = 1.f / std::sqrt(static_cast<float>(head_dim));
+    for (int wi = 0; wi < window_count; wi++)
+    {
+        const Window& w = windows[wi];
+        const int local_h = w.h1 - w.h0;
+        const int local_w = w.w1 - w.w0;
+        const int video_length = (w.t1 - w.t0) * local_h * local_w;
+        const int seq = video_length + text_length;
+
+        // qkv_prepare：算窗口内 seq 个 token 的 q/k/v（MM-RoPE + bf16）。
+        {
+            std::vector<ncnn::VkMat> bindings(8);
+            bindings[0] = vid_qkv;
+            bindings[1] = txt_qkv;
+            bindings[2] = q_ws;
+            bindings[3] = k_ws;
+            bindings[4] = v_ws;
+            bindings[5] = vid_weights.norm_q_gpu;
+            bindings[6] = vid_weights.norm_k_gpu;
+            bindings[7] = rope_freqs_gpu;
+
+            const uint32_t total = static_cast<uint32_t>(heads) * seq;
+            std::vector<ncnn::vk_constant_type> constants(15);
+            constants[0].u32 = static_cast<uint32_t>(heads);
+            constants[1].u32 = static_cast<uint32_t>(head_dim);
+            constants[2].u32 = static_cast<uint32_t>(seq);
+            constants[3].u32 = static_cast<uint32_t>(video_length);
+            constants[4].u32 = static_cast<uint32_t>(text_length);
+            constants[5].u32 = static_cast<uint32_t>(local_h);
+            constants[6].u32 = static_cast<uint32_t>(local_w);
+            constants[7].u32 = static_cast<uint32_t>(w.h0);
+            constants[8].u32 = static_cast<uint32_t>(w.w0);
+            constants[9].u32 = static_cast<uint32_t>(w.t0);
+            constants[10].u32 = static_cast<uint32_t>(height);
+            constants[11].u32 = static_cast<uint32_t>(width);
+            constants[12].u32 = static_cast<uint32_t>(dim);
+            constants[13].f = norm_eps;
+            constants[14].u32 = total;
+
+            ncnn::VkMat dispatcher;
+            dispatcher.w = total;
+            dispatcher.h = 1;
+            dispatcher.c = 1;
+            cmd.record_pipeline(pipeline_qkv_prepare, bindings, constants, dispatcher);
+        }
+
+        // attention：softmax(QK^T * scale) @ V，写当前窗口段。
+        {
+            std::vector<ncnn::VkMat> bindings(5);
+            bindings[0] = q_ws;
+            bindings[1] = k_ws;
+            bindings[2] = v_ws;
+            bindings[3] = vid_out_ws;
+            bindings[4] = txt_out_ws;
+
+            const uint32_t total = static_cast<uint32_t>(heads) * seq;
+            std::vector<ncnn::vk_constant_type> constants(16);
+            constants[0].u32 = static_cast<uint32_t>(head_dim);
+            constants[1].u32 = static_cast<uint32_t>(seq);
+            constants[2].u32 = static_cast<uint32_t>(video_length);
+            constants[3].u32 = static_cast<uint32_t>(text_length);
+            constants[4].u32 = static_cast<uint32_t>(video_tokens);
+            constants[5].u32 = static_cast<uint32_t>(local_h);
+            constants[6].u32 = static_cast<uint32_t>(local_w);
+            constants[7].u32 = static_cast<uint32_t>(w.h0);
+            constants[8].u32 = static_cast<uint32_t>(w.w0);
+            constants[9].u32 = static_cast<uint32_t>(w.t0);
+            constants[10].u32 = static_cast<uint32_t>(height);
+            constants[11].u32 = static_cast<uint32_t>(width);
+            constants[12].u32 = static_cast<uint32_t>(dim);
+            constants[13].u32 = static_cast<uint32_t>(wi);
+            constants[14].f = attention_scale;
+            constants[15].u32 = total;
+
+            ncnn::VkMat dispatcher;
+            dispatcher.w = total;
+            dispatcher.h = 1;
+            dispatcher.c = 1;
+            cmd.record_pipeline(pipeline_attention, bindings, constants, dispatcher);
+        }
+    }
+
+    // 跨窗口归约：视频累加（不平均），文本平均。
+    ncnn::VkMat vid_attention;
+    ncnn::VkMat txt_attention;
+    vid_attention.create(dim, video_tokens, 4u, 1, opt.workspace_vkallocator);
+    txt_attention.create(dim, text_length, 4u, 1, opt.workspace_vkallocator);
+    if (vid_attention.empty() || txt_attention.empty())
+        return -100;
+    auto window_sum = [&](const ncnn::VkMat& src, ncnn::VkMat& dst, int tokens, uint has_divide) {
+        std::vector<ncnn::VkMat> bindings(2);
+        bindings[0] = src;
+        bindings[1] = dst;
+        const uint32_t total = static_cast<uint32_t>(tokens) * dim;
+        std::vector<ncnn::vk_constant_type> constants(5);
+        constants[0].u32 = static_cast<uint32_t>(dim);
+        constants[1].u32 = static_cast<uint32_t>(tokens);
+        constants[2].u32 = static_cast<uint32_t>(window_count);
+        constants[3].u32 = has_divide;
+        constants[4].u32 = total;
+        ncnn::VkMat dispatcher;
+        dispatcher.w = total;
+        dispatcher.h = 1;
+        dispatcher.c = 1;
+        cmd.record_pipeline(pipeline_text_normalize, bindings, constants, dispatcher);
+    };
+    window_sum(vid_out_ws, vid_attention, video_tokens, 0);
+    window_sum(txt_out_ws, txt_attention, text_length, 1);
+
+    // ========================================================================
+    // 阶段四：输出投影 + 门控残差
+    // ========================================================================
+    ncnn::VkMat vid_proj;
+    ncnn::VkMat txt_proj;
+    if (vid_weights.proj_out->forward(vid_attention, vid_proj, cmd, opt) != 0
+        || text_branch.proj_out->forward(txt_attention, txt_proj, cmd, opt) != 0)
+        return -100;
+    if (ada_residual(vid_proj, vid, vid_weights.attn_gate_gpu, 2, 0) != 0)
+        return -100;
+    if (last_layer)
+    {
+        if (ada_residual(txt_proj, txt, text_branch.attn_gate_gpu, 2, 1) != 0)
+            return -100;
+    }
+    else
+    {
+        if (ada_residual(txt_proj, txt, text_branch.attn_gate_gpu, 2, 0) != 0)
+            return -100;
+    }
+
+    // ========================================================================
+    // 阶段五：视频 MLP
+    // ========================================================================
+    ncnn::VkMat vid_mlp_in;
+    if (rmsnorm_ada(vid_proj, vid_weights.mlp_scale_gpu, vid_weights.mlp_shift_gpu, 3, 1, vid_mlp_in) != 0)
+        return -100;
+    ncnn::VkMat vid_mlp;
+    if (apply_mlp_gpu(vid_mlp_in, vid_weights, vid_mlp) != 0)
+        return -100;
+    if (ada_residual(vid_mlp, vid_proj, vid_weights.mlp_gate_gpu, 5, 0) != 0)
+        return -100;
+    top_blobs[0] = vid_mlp;
+
+    // ========================================================================
+    // 阶段六：文本 MLP（last_layer 时 txt_out = 2 * txt_proj）
+    // ========================================================================
+    if (last_layer)
+    {
+        ncnn::VkMat txt_last;
+        txt_last.create(dim, text_length, 4u, 1, opt.blob_vkallocator);
+        if (txt_last.empty())
+            return -100;
+        // 复用 window_sum 无法表达「两倍」，用 ada_residual mode=2（不读 residual/gate/emb）。
+        {
+            std::vector<ncnn::VkMat> bindings(4);
+            bindings[0] = txt_proj;
+            bindings[1] = txt_proj;   // 占位（mode=2 不读）
+            bindings[2] = text_branch.mlp_gate_gpu;  // 占位
+            bindings[3] = embedding;  // 占位
+            const uint32_t total = static_cast<uint32_t>(text_length) * dim;
+            std::vector<ncnn::vk_constant_type> constants(4);
+            constants[0].u32 = static_cast<uint32_t>(dim);
+            constants[1].u32 = 0;
+            constants[2].u32 = 2;   // mode=2：两倍
+            constants[3].u32 = total;
+            ncnn::VkMat dispatcher;
+            dispatcher.w = total;
+            dispatcher.h = 1;
+            dispatcher.c = 1;
+            cmd.record_pipeline(pipeline_ada_residual, bindings, constants, dispatcher);
+        }
+        top_blobs[1] = txt_proj;
+        return 0;
+    }
+
+    ncnn::VkMat txt_mlp_in;
+    if (rmsnorm_ada(txt_proj, text_branch.mlp_scale_gpu, text_branch.mlp_shift_gpu, 3, 1, txt_mlp_in) != 0)
+        return -100;
+    ncnn::VkMat txt_mlp;
+    if (apply_mlp_gpu(txt_mlp_in, text_branch, txt_mlp) != 0)
+        return -100;
+    if (ada_residual(txt_mlp, txt_proj, text_branch.mlp_gate_gpu, 5, 0) != 0)
+        return -100;
+    top_blobs[1] = txt_mlp;
+    return 0;
+}
+
+#endif // NCNN_VULKAN
 
 DEFINE_LAYER_CREATOR(SeedVR2DiTBlock)
