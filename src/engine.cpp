@@ -4,7 +4,9 @@
 #include "seedvr2/engine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <random>
@@ -170,10 +172,17 @@ public:
             return fail(Status::InvalidArgument,
                         "negative embedding must be [tokens,5120] when CFG is enabled");
 
+        const bool profile = std::getenv("SEEDVR2_PROFILE") != nullptr;
+        const auto t_start = std::chrono::steady_clock::now();
+        auto t_enc = t_start;
+        auto t_dit = t_start;
+        auto t_dec = t_start;
+
         PreparedVideo prepared;
         int result = preprocess_video(input, prepared, error);
         if (result != 0)
             return result;
+        t_enc = std::chrono::steady_clock::now();
 
         std::mt19937_64 random(options.seed);
         ncnn::Mat encoded;
@@ -184,6 +193,7 @@ public:
                             encoded);
         if (result != 0)
             return fail(static_cast<Status>(result), "VAE encode failed: " + vae.last_error());
+        t_dit = std::chrono::steady_clock::now();
 
         // PyTorch 基准在 VAE posterior 之后依次生成 initial_noise 和 augment_noise。
         ncnn::Mat latent = make_random_latent(encoded, random);
@@ -238,14 +248,30 @@ public:
                 return result;
             latent = next;
         }
+        t_dec = std::chrono::steady_clock::now();
 
         ncnn::Mat decoded;
         result = vae.decode(latent, options.vae_scaling_factor, decoded);
         if (result != 0)
             return fail(static_cast<Status>(result), "VAE decode failed: " + vae.last_error());
+        const auto t_post = std::chrono::steady_clock::now();
+
         result = postprocess_video(decoded, prepared, output, error);
         if (result == 0)
             error.clear();
+
+        if (profile)
+        {
+            const auto t_end = std::chrono::steady_clock::now();
+            const auto ms = [](std::chrono::steady_clock::time_point a,
+                               std::chrono::steady_clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            std::fprintf(stderr,
+                         "[PROFILE] preprocess %.1f ms | vae_encode %.1f ms | dit_%zu_steps %.1f ms | vae_decode %.1f ms | postprocess %.1f ms | total %.1f ms\n",
+                         ms(t_start, t_enc), ms(t_enc, t_dit), timesteps.size(),
+                         ms(t_dit, t_dec), ms(t_dec, t_post), ms(t_post, t_end), ms(t_start, t_end));
+        }
         return result;
     }
 
