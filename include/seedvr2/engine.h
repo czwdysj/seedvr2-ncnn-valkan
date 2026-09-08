@@ -44,6 +44,11 @@ struct RuntimeOptions
     bool stochastic_vae = true;
     bool use_fp16_storage = false;
     bool use_fp16_arithmetic = false;
+
+    // DiT 权重加载策略：false=流式（每次 forward 重读 6.4G，显存峰值低但慢）；
+    // true=常驻（32 block 权重一次 load 进内存/显存，快但显存约多占 6.4G）。
+    // 供内存受限与追求吞吐两种部署场景在 load 时选择。
+    bool dit_resident = false;
 };
 
 struct Video

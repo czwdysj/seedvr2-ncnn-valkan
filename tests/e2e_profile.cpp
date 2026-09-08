@@ -54,6 +54,8 @@ int main(int argc, char** argv)
     opts.sampling_steps = 1;
     opts.cfg_scale = 1.0f;
     opts.seed = 666;
+    // 通过环境变量 SEEDVR2_DIT_RESIDENT=1 切换常驻模式（默认流式）。
+    opts.dit_resident = std::getenv("SEEDVR2_DIT_RESIDENT") != nullptr;
 
     seedvr2::SeedVR2Engine engine;
     const int load_ret = engine.load(model_dir, opts);

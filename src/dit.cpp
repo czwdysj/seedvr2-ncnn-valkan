@@ -40,6 +40,27 @@ int load_io_net(const std::filesystem::path& param,
     return static_cast<int>(Status::Ok);
 }
 
+// 常驻模式辅助：加载单个 block 的 Net（供 load 阶段一次性预加载 32 个 block）。
+std::unique_ptr<ncnn::Net> load_block_net(int index,
+                                          const std::filesystem::path& root,
+                                          const RuntimeContext& context,
+                                          std::string& error)
+{
+    char stem[64];
+    std::snprintf(stem, sizeof(stem), "seedvr2_dit_block_%02d.ncnn", index);
+    auto net = std::make_unique<ncnn::Net>();
+    context.configure(*net);
+    net->register_custom_layer("SeedVR2DiTBlock", SeedVR2DiTBlock_layer_creator);
+    const std::string param = (root / (std::string(stem) + ".param")).string();
+    const std::string bin = (root / (std::string(stem) + ".bin")).string();
+    if (net->load_param(param.c_str()) != 0 || net->load_model(bin.c_str()) != 0)
+    {
+        error = "failed to load DiT block " + std::to_string(index);
+        return nullptr;
+    }
+    return net;
+}
+
 ncnn::Mat flatten_latent(const ncnn::Mat& value)
 {
     ncnn::Mat result(value.c,
@@ -114,6 +135,28 @@ int SeedVR2DiT::load(const std::string& model_dir, const RuntimeContext& context
         input_.reset();
         return output_result;
     }
+
+    // 常驻模式：一次性把 32 个 block 的权重全 load 进内存（RAM + 后续 forward 上传显存）。
+    // 流式模式（默认）保持 blocks_ 为空，forward 时由 run_block 逐个临时加载。
+    resident_ = context.options().dit_resident;
+    if (resident_)
+    {
+        blocks_.clear();
+        blocks_.reserve(32);
+        for (int index = 0; index < 32; ++index)
+        {
+            auto net = load_block_net(index, root, context, last_error_);
+            if (!net)
+            {
+                blocks_.clear();
+                input_.reset();
+                output_.reset();
+                return static_cast<int>(Status::ModelLoadFailed);
+            }
+            blocks_.push_back(std::move(net));
+        }
+    }
+
     context_ = &context;
     model_dir_ = model_dir;
     last_error_.clear();
@@ -197,21 +240,43 @@ int SeedVR2DiT::forward(const ncnn::Mat& latent,
         return static_cast<int>(Status::InferenceFailed);
     }
 
-    for (int index = 0; index < 32; ++index)
+    if (resident_ && blocks_.size() == 32)
     {
-        ncnn::Mat next_video;
-        ncnn::Mat next_text;
-        const int result = run_block(index,
-                                     video_tokens,
-                                     text_tokens,
-                                     embedding,
-                                     patched_shape,
-                                     next_video,
-                                     next_text);
-        if (result != 0)
-            return result;
-        video_tokens = next_video;
-        text_tokens = next_text;
+        for (int index = 0; index < 32; ++index)
+        {
+            ncnn::Mat next_video;
+            ncnn::Mat next_text;
+            ncnn::Extractor extractor = blocks_[static_cast<std::size_t>(index)]->create_extractor();
+            if (extractor.input("vid", video_tokens) != 0 || extractor.input("txt", text_tokens) != 0
+                || extractor.input("emb", embedding) != 0 || extractor.input("vid_shape", patched_shape) != 0
+                || extractor.extract("vid_out", next_video) != 0
+                || extractor.extract("txt_out", next_text) != 0)
+            {
+                last_error_ = "DiT block inference failed at index " + std::to_string(index);
+                return static_cast<int>(Status::InferenceFailed);
+            }
+            video_tokens = next_video;
+            text_tokens = next_text;
+        }
+    }
+    else
+    {
+        for (int index = 0; index < 32; ++index)
+        {
+            ncnn::Mat next_video;
+            ncnn::Mat next_text;
+            const int result = run_block(index,
+                                         video_tokens,
+                                         text_tokens,
+                                         embedding,
+                                         patched_shape,
+                                         next_video,
+                                         next_text);
+            if (result != 0)
+                return result;
+            video_tokens = next_video;
+            text_tokens = next_text;
+        }
     }
 
     ncnn::Extractor output_extractor = output_->create_extractor();

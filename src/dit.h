@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "runtime_context.h"
 
@@ -40,6 +41,10 @@ private:
     std::string model_dir_;
     std::unique_ptr<ncnn::Net> input_;
     std::unique_ptr<ncnn::Net> output_;
+    // 常驻模式：load 时一次性把 32 个 block 的 Net 全部载入；流式模式保持为空，
+    // forward 时由 run_block 逐个临时加载。resident_ 由 RuntimeOptions.dit_resident 决定。
+    std::vector<std::unique_ptr<ncnn::Net>> blocks_;
+    bool resident_ = false;
     std::string last_error_;
 };
 } // namespace seedvr2
