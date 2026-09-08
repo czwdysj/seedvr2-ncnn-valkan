@@ -1,15 +1,15 @@
 // 本文件实现动态 VAE 的模型加载、posterior 采样与缩放。
 // Encoder NCNN 图输出 [32,T,H,W] moments，前 16 通道为 mean、后 16 通道为
 // logvar；Decoder 输入为逆 scaling 后的 [16,T,H,W]。三种动态层仍复用已验证实现。
-#include "vae.h"
+#include "model/vae.h"
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 
-#include "dynamic_framewise_group_norm.h"
-#include "dynamic_framewise_spatial_attention.h"
-#include "dynamic_space_time_shuffle.h"
+#include "layers/dynamic_framewise_group_norm.h"
+#include "layers/dynamic_framewise_spatial_attention.h"
+#include "layers/dynamic_space_time_shuffle.h"
 #include "seedvr2/engine.h"
 
 namespace seedvr2

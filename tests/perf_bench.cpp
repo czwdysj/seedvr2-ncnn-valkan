@@ -18,12 +18,12 @@
 #include "mat.h"
 #include "net.h"
 
-#include "dynamic_framewise_group_norm.h"
-#include "dynamic_framewise_spatial_attention.h"
-#include "dynamic_space_time_shuffle.h"
-#include "seedvr2_dit_block.h"
-#include "seedvr2_dit_input.h"
-#include "seedvr2_dit_output.h"
+#include "layers/dynamic_framewise_group_norm.h"
+#include "layers/dynamic_framewise_spatial_attention.h"
+#include "layers/dynamic_space_time_shuffle.h"
+#include "layers/seedvr2_dit_block.h"
+#include "layers/seedvr2_dit_input.h"
+#include "layers/seedvr2_dit_output.h"
 
 namespace
 {

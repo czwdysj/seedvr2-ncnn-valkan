@@ -3,7 +3,7 @@
 // 由 NCNN InnerProduct 执行。Vulkan 路径复用同一份权重顺序与动态形状约束：
 // 三个自定义 shader（patchify / sinusoidal / silu）负责原生算子表达不了的
 // 动态逻辑，5 个矩阵乘投影直接复用 InnerProduct 的 Vulkan 实现。
-#include "seedvr2_dit_input.h"
+#include "layers/seedvr2_dit_input.h"
 
 #include <cmath>
 #include <cstring>

@@ -10,7 +10,7 @@
 //   - channels = 32/64（必须能被 32 整除，因 GroupNorm 用 32 组）；
 //   - tokens = W*H = 15/16/25/64（含非方阵、单帧、非 4 对齐）；
 //   - 权重用小值，保证 QK^T 量级可控、softmax 不溢出。
-#include "dynamic_framewise_spatial_attention.h"
+#include "layers/dynamic_framewise_spatial_attention.h"
 
 #include <cmath>
 #include <cstdio>

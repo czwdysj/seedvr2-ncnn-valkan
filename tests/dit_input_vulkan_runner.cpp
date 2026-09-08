@@ -8,7 +8,7 @@
 //
 // 做法：用小尺寸 dim=32/sinusoidal_dim=16/embedding_dim=192 生成单层 ncnn 图，
 // 分别用 CPU 与 Vulkan 后端各 forward 一次，比较 4 个输出。
-#include "seedvr2_dit_input.h"
+#include "layers/seedvr2_dit_input.h"
 
 #include <cmath>
 #include <cstdio>

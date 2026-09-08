@@ -10,7 +10,7 @@
 //   - C=5（非 4 倍数：验证标量路径 + cstep 对齐）
 //   - r_t=2（首帧删除分支）、r_t=1（非 2 时间倍率分支）
 //   - W=5（非 4 对齐，覆盖 cstep 按 16 字节对齐后的地址计算）
-#include "dynamic_space_time_shuffle.h"
+#include "layers/dynamic_space_time_shuffle.h"
 
 #include <cstdio>
 #include <cstdlib>

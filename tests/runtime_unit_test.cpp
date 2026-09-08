@@ -1,9 +1,9 @@
 // 本文件对不依赖大权重的核心调度数学进行快速单元测试。
 // 覆盖 Video/Text 数据契约、16 倍数中心裁剪、4n+1 补帧、后处理裁帧、CFG 和
 // Euler endpoint；这些测试用于在每次重构后先发现布局或公式错误，再跑大模型。
-#include "postprocessing.h"
-#include "preprocessing.h"
-#include "sampler.h"
+#include "pipeline/postprocessing.h"
+#include "pipeline/preprocessing.h"
+#include "model/sampler.h"
 #include "seedvr2/engine.h"
 
 #include <cmath>

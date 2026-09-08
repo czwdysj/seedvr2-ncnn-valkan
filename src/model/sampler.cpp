@@ -1,7 +1,7 @@
 // 本文件实现与 SeedVR2 PyTorch 基准一致的 CFG 和 Euler/v_lerp 更新。
 // lerp schedule 满足 A(t)=1-t/T、B(t)=t/T；最终 endpoint 直接得到
 // x0=x_t-B(t)*prediction。全部计算使用 FP32，便于先完成 CPU 数值基线。
-#include "sampler.h"
+#include "model/sampler.h"
 
 #include <algorithm>
 #include <cmath>

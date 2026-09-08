@@ -1,7 +1,7 @@
 // 本文件实现公开 Video 到 VAE 输入 Mat 的确定性转换。
 // 空间采用 SeedVR2 官方 DivisibleCrop 的中心裁剪语义，不偷偷缩放输入；时间轴
 // 复制最后一帧到 4n+1，使因果 VAE 的四倍时间下采样满足结构约束。
-#include "preprocessing.h"
+#include "pipeline/preprocessing.h"
 
 #include <algorithm>
 #include <cstddef>

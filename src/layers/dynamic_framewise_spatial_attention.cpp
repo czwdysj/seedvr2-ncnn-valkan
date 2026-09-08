@@ -14,7 +14,7 @@
 // 中间激活（normalized/q/k/v/attended）与统计量统一用 fp32 workspace 暂存，
 // 保证「正确性优先」阶段的精度；权重/输入/输出用 ncnn 注入的 sfp 类型 + buffer_ld1/st1
 // 宏读写（精度自适应）。
-#include "dynamic_framewise_spatial_attention.h"
+#include "layers/dynamic_framewise_spatial_attention.h"
 
 #include <algorithm>
 #include <cmath>

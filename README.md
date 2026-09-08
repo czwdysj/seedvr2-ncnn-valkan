@@ -99,19 +99,24 @@ DiT 的 32 个 block 使用流式加载方式执行。运行时每次只加载�
 include/seedvr2/engine.h  对外公开 API
 
 src/
-  engine.cpp              完整推理调度
-  vae.cpp                 VAE Encoder/Decoder
-  dit.cpp                 32 层 DiT 流式执行
-  sampler.cpp             CFG 和 Euler sampler
-  preprocessing.cpp       视频预处理
-  postprocessing.cpp      视频后处理
-  vulkan_context.cpp      Vulkan/NCNN 运行时配置
-  dynamic_framewise_group_norm.*        自定义层：逐帧 GroupNorm
-  dynamic_framewise_spatial_attention.* 自定义层：空间注意力
-  dynamic_space_time_shuffle.*          自定义层：时空 Shuffle
-  seedvr2_dit_input.*     自定义层：DiT 输入投影
-  seedvr2_dit_block.*     自定义层：DiT Transformer block
-  seedvr2_dit_output.*    自定义层：DiT 输出投影
+  core/                   引擎调度与运行时
+    engine.cpp            完整推理调度
+    runtime_context.h     运行时上下文
+    vulkan_context.cpp    Vulkan/NCNN 运行时配置
+  model/                  模型组件
+    vae.h/.cpp            VAE Encoder/Decoder
+    dit.h/.cpp            32 层 DiT 流式执行
+    sampler.h/.cpp        CFG 和 Euler sampler
+  layers/                 六个自定义算子层
+    dynamic_framewise_group_norm.h/.cpp        逐帧 GroupNorm
+    dynamic_framewise_spatial_attention.h/.cpp 空间注意力
+    dynamic_space_time_shuffle.h/.cpp          时空 Shuffle
+    seedvr2_dit_input.h/.cpp                   DiT 输入投影
+    seedvr2_dit_block.h/.cpp                   DiT Transformer block
+    seedvr2_dit_output.h/.cpp                  DiT 输出投影
+  pipeline/               视频前后处理
+    preprocessing.h/.cpp  视频预处理
+    postprocessing.h/.cpp 视频后处理
 
 apps/seedvr2_cli.cpp      命令行入口
 tests/                    分层和完整推理 runner

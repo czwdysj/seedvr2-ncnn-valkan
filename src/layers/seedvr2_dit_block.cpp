@@ -9,7 +9,7 @@
 // + adaLN 调制，reduce+apply 两段）、qkv_prepare（MM-RoPE 旋转 + bf16 舍入）、
 // attention（softmax 三遍 QK^T，不物化 scores）、ada_residual（门控残差）、
 // silu（SwiGLU 门控）、text_normalize（文本跨窗口平均）。
-#include "seedvr2_dit_block.h"
+#include "layers/seedvr2_dit_block.h"
 
 #include <algorithm>
 #include <cstdint>

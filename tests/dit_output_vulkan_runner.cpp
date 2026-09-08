@@ -8,7 +8,7 @@
 //
 // 做法：用小尺寸 dim=32/64、output_channels=4/5/8 生成单层 ncnn 图，分别用
 // CPU 与 Vulkan 后端各 forward 一次，比较 2 个输出（浮点 output + int shape）。
-#include "seedvr2_dit_output.h"
+#include "layers/seedvr2_dit_output.h"
 
 #include <cmath>
 #include <cstdio>

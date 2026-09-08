@@ -1,7 +1,7 @@
 // 本文件实现 VAE 输出的裁帧、限幅和布局转换。
 // 它只移除预处理为满足 4n+1 而复制的尾帧；空间尺寸保留中心裁剪后的结果，
 // 防止无定义的插值步骤影响 PyTorch 与 NCNN 的数值对齐。
-#include "postprocessing.h"
+#include "pipeline/postprocessing.h"
 
 #include <algorithm>
 #include <cstddef>

@@ -1,8 +1,8 @@
 // 本文件是正式 SeedVR2DiT 类的端到端数值测试入口。
 // 它兼容旧验证脚本的 [L,33] raw 参数，把输入还原成 [33,T,H,W] 后调用库 API，
 // 再把 [16,T,H,W] 输出展平写回。32 层调度不再复制在 runner 中。
-#include "dit.h"
-#include "runtime_context.h"
+#include "model/dit.h"
+#include "core/runtime_context.h"
 
 #include <cstdint>
 #include <cstdlib>

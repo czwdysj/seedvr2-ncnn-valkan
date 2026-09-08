@@ -3,7 +3,7 @@
 // timestep embedding[15360] 和视频 patch 形状 T/H/W；输出两个带 int32
 // [rows,cols] 文件头的 FP32 矩阵。该 runner 只用于逐层对齐和定位误差，完整
 // 产品接口由后续 SeedVR2Engine 负责 block 流式加载、CFG、sampler 与 VAE。
-#include "seedvr2_dit_block.h"
+#include "layers/seedvr2_dit_block.h"
 
 #include <net.h>
 

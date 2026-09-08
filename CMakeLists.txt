@@ -27,19 +27,19 @@ add_subdirectory("${NCNN_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/ncnn")
 
 add_library(
     seedvr2_ncnn STATIC
-    src/engine.cpp
-    src/preprocessing.cpp
-    src/postprocessing.cpp
-    src/vae.cpp
-    src/dit.cpp
-    src/sampler.cpp
-    src/vulkan_context.cpp
-    src/dynamic_framewise_group_norm.cpp
-    src/dynamic_framewise_spatial_attention.cpp
-    src/dynamic_space_time_shuffle.cpp
-    src/seedvr2_dit_input.cpp
-    src/seedvr2_dit_block.cpp
-    src/seedvr2_dit_output.cpp)
+    src/core/engine.cpp
+    src/pipeline/preprocessing.cpp
+    src/pipeline/postprocessing.cpp
+    src/model/vae.cpp
+    src/model/dit.cpp
+    src/model/sampler.cpp
+    src/core/vulkan_context.cpp
+    src/layers/dynamic_framewise_group_norm.cpp
+    src/layers/dynamic_framewise_spatial_attention.cpp
+    src/layers/dynamic_space_time_shuffle.cpp
+    src/layers/seedvr2_dit_input.cpp
+    src/layers/seedvr2_dit_block.cpp
+    src/layers/seedvr2_dit_output.cpp)
 target_include_directories(
     seedvr2_ncnn
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

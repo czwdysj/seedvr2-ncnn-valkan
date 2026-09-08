@@ -11,7 +11,7 @@
 //   - W = 5/7（非 4 对齐，覆盖 cstep 按 16 字节对齐后的地址计算）
 //
 // 注意：groups 在本层构造函数固定为 32，故 channels 必须是 32 的倍数。
-#include "dynamic_framewise_group_norm.h"
+#include "layers/dynamic_framewise_group_norm.h"
 
 #include <cmath>
 #include <cstdio>

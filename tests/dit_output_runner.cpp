@@ -1,7 +1,7 @@
 // 本文件提供 SeedVR2DiTOutput 的独立 NCNN 数值测试入口。
 // 输入最后一个 block 的 FP32 视频 token、时间 embedding 和动态 patch T/H/W，
 // 输出带 int32 [rows,cols] 文件头的反 patch token，用于验证输出头。
-#include "seedvr2_dit_output.h"
+#include "layers/seedvr2_dit_output.h"
 
 #include <net.h>
 

@@ -11,9 +11,9 @@
 #include <string>
 #include <vector>
 
-#include "dynamic_framewise_group_norm.h"
-#include "dynamic_framewise_spatial_attention.h"
-#include "dynamic_space_time_shuffle.h"
+#include "layers/dynamic_framewise_group_norm.h"
+#include "layers/dynamic_framewise_spatial_attention.h"
+#include "layers/dynamic_space_time_shuffle.h"
 
 static bool read_raw(const char* path, ncnn::Mat& input)
 {

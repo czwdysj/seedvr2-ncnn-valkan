@@ -9,7 +9,7 @@
 //     shader：reduce 阶段用 shared-memory 树形归约求出每个 (帧, 组) 的 sum 与
 //     sq_sum，normalize 阶段每个 work item 计算一个输出元素的仿射变换。
 // 两条路径共享 load_param/load_model，保证动态语义与权重完全一致。
-#include "dynamic_framewise_group_norm.h"
+#include "layers/dynamic_framewise_group_norm.h"
 
 #include <cmath>
 

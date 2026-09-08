@@ -12,12 +12,12 @@
 #include <random>
 #include <utility>
 
-#include "dit.h"
-#include "postprocessing.h"
-#include "preprocessing.h"
-#include "runtime_context.h"
-#include "sampler.h"
-#include "vae.h"
+#include "model/dit.h"
+#include "pipeline/postprocessing.h"
+#include "pipeline/preprocessing.h"
+#include "core/runtime_context.h"
+#include "model/sampler.h"
+#include "model/vae.h"
 
 namespace seedvr2
 {

@@ -1,7 +1,7 @@
 // 本文件实现 NCNN 运行时选项和 Vulkan 实例的统一管理。
 // CPU 构建中请求 Vulkan 会返回明确的 UnsupportedBackend；打开 NCNN_VULKAN 后，
 // 这里负责创建全局 GPU 实例并校验设备编号。各模型不直接持有 Vulkan 全局资源。
-#include "runtime_context.h"
+#include "core/runtime_context.h"
 
 #include <algorithm>
 #include <thread>

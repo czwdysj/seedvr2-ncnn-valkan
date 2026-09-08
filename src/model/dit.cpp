@@ -1,14 +1,14 @@
 // 本文件实现完整 DiT 的流式调度，是原 dit_full_runner 中真实运行逻辑的库化版本。
 // 输入/输出头常驻，32 个大 block 逐层 load-forward-destroy；块间只传递 vid/txt
 // token、时间 embedding 和动态 patch shape，因此峰值权重内存约为一个最大 block。
-#include "dit.h"
+#include "model/dit.h"
 
 #include <cstdio>
 #include <filesystem>
 
-#include "seedvr2_dit_block.h"
-#include "seedvr2_dit_input.h"
-#include "seedvr2_dit_output.h"
+#include "layers/seedvr2_dit_block.h"
+#include "layers/seedvr2_dit_input.h"
+#include "layers/seedvr2_dit_output.h"
 #include "seedvr2/engine.h"
 
 namespace seedvr2

@@ -7,7 +7,7 @@
 
 #include <string>
 
-#include "preprocessing.h"
+#include "pipeline/preprocessing.h"
 #include "seedvr2/engine.h"
 
 namespace seedvr2

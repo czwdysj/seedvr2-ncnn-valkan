@@ -11,7 +11,7 @@
 //
 // 做法：用小尺寸 dim=32/128 生成单层 ncnn 图，分别用 CPU 与 Vulkan 后端各
 // forward 一次，比较 2 个输出。
-#include "seedvr2_dit_block.h"
+#include "layers/seedvr2_dit_block.h"
 
 #include <cmath>
 #include <cstdio>

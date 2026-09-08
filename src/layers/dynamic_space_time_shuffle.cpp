@@ -8,7 +8,7 @@
 //     shader。shader 以内嵌字符串携带，create_pipeline 阶段用 ncnn 的运行时 glslang
 //     编译成 SPIR-V；权重在 upload_model 阶段上传 GPU，forward 只记录一次 dispatch。
 // 两条路径共享 load_param/load_model，保证权重与动态语义完全一致。
-#include "dynamic_space_time_shuffle.h"
+#include "layers/dynamic_space_time_shuffle.h"
 
 #if NCNN_VULKAN
 #include <gpu.h>

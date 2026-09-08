@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "runtime_context.h"
+#include "core/runtime_context.h"
 
 namespace seedvr2
 {

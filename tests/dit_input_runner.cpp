@@ -1,7 +1,7 @@
 // 本文件提供 SeedVR2DiTInput 的独立 NCNN 数值测试入口。
 // 它读取 FP32 视频/文本 token、标量 timestep 和动态 T/H/W，输出带 int32
 // [rows,cols] 文件头的视频、文本和时间 embedding，供 PyTorch 逐层对齐。
-#include "seedvr2_dit_input.h"
+#include "layers/seedvr2_dit_input.h"
 
 #include <net.h>
 

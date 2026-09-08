@@ -5,7 +5,7 @@
 // Vulkan 路径复用同一份权重顺序与动态形状约束：三个自定义 shader
 // （norm_reduce / norm_apply / unpatchify）负责原生算子表达不了的动态逻辑，
 // 输出投影直接复用 InnerProduct 的 Vulkan 实现。整层是 DiTInput 的对称逆操作。
-#include "seedvr2_dit_output.h"
+#include "layers/seedvr2_dit_output.h"
 
 #include <cmath>
 
