@@ -12,8 +12,8 @@
 对应实现：
 
 ```text
-custom_layers/dynamic_framewise_group_norm.h
-custom_layers/dynamic_framewise_group_norm.cpp
+src/dynamic_framewise_group_norm.h
+src/dynamic_framewise_group_norm.cpp
 ```
 
 ## 2. 输入与输出

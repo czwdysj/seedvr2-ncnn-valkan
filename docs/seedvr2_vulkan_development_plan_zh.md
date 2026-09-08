@@ -567,7 +567,7 @@ ctest --test-dir build-vulkan --output-on-failure
 公共 API 继续只暴露 `SeedVR2Engine`，不向用户暴露 Vulkan 类型。内部建议：
 
 ```text
-custom_layers/
+src/
   *.cpp/*.h             Layer 语义与 CPU/Vulkan 入口
   vulkan/               可复用 GPU primitive/pipeline 管理
   shader/               GLSL compute

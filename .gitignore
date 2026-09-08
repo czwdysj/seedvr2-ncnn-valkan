@@ -1,41 +1,45 @@
+# ---- OS / editor ----
 .DS_Store
-lightning_logs
-__pycache__
 .idea
 .vscode
 
-/downloads
-/clip-vit-large-patch14
-/wandb
+# ---- Python ----
+__pycache__/
+*.pyc
+*.ipynb
+*.ipynb_checkpoints/
+
+# ---- Build artifacts ----
+/build/
+/cmake-build-*/
+/cpp_runtime/build/
+*.o
+*.obj
+*.a
+*.so
+
+# ---- Model weights (PyTorch checkpoints / ncnn inference weights / embeddings) ----
+/weights/
+/ckpts
+/ncnn_models/
+/test_vectors/
+/pytorch_model/
 *.pth
 *.safetensors
-/debug
-/persistence
-/pixart_text_encoder
-/llm14b
-/test_results
-/log
-*.vsix
-*.tar.gz
-*.mp4
-*.ipynb_checkpoints
-*.ipynb
-/concatenate_ranks_i2v_lk_v0.3.1
-/test_videos
-/results
-/ckpts
+*.pt
+*.onnx
 
-# SeedVR2 NCNN local artifacts and generated outputs.
-/weights/
+# ---- Generated outputs / logs ----
 /outputs/
-/test_vectors/
-/pnnx_export/
-/ncnn_models/
-/learn_pnnx/out/
-/pytorch_model/
+/results/
+/test_videos/
+/debug/
+/log
+lightning_logs/
+/wandb/
+/test_results/
 
-# Local build and downloaded dependency workspaces.
-/build/
-/cpp_runtime/build/
-/cmake-build-*/
-/third_party/
+# ---- Archives / packages ----
+*.tar.gz
+*.vsix
+*.mp4

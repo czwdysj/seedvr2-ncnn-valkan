@@ -12,8 +12,8 @@
 对应实现：
 
 ```text
-custom_layers/seedvr2_dit_output.h
-custom_layers/seedvr2_dit_output.cpp
+src/seedvr2_dit_output.h
+src/seedvr2_dit_output.cpp
 cpp_runtime/dit_output_runner.cpp
 ```
 

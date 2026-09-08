@@ -10,8 +10,8 @@ Transformer Block 使用的三类特征：2560 维视频 token、2560 维文本 
 对应实现：
 
 ```text
-custom_layers/seedvr2_dit_input.h
-custom_layers/seedvr2_dit_input.cpp
+src/seedvr2_dit_input.h
+src/seedvr2_dit_input.cpp
 cpp_runtime/dit_input_runner.cpp
 ```
 

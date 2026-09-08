@@ -12,8 +12,8 @@ Encoder 和 Decoder 各有一个实例，当前模型通道数均为 512。
 对应实现：
 
 ```text
-custom_layers/dynamic_framewise_spatial_attention.h
-custom_layers/dynamic_framewise_spatial_attention.cpp
+src/dynamic_framewise_spatial_attention.h
+src/dynamic_framewise_spatial_attention.cpp
 ```
 
 ## 2. 输入与输出

@@ -12,8 +12,8 @@ Decoder 中共有三个实例：前两个同时进行时间和空间 2 倍上采
 对应实现：
 
 ```text
-custom_layers/dynamic_space_time_shuffle.h
-custom_layers/dynamic_space_time_shuffle.cpp
+src/dynamic_space_time_shuffle.h
+src/dynamic_space_time_shuffle.cpp
 ```
 
 ## 2. 输入与输出

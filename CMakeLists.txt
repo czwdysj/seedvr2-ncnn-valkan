@@ -34,16 +34,16 @@ add_library(
     src/dit.cpp
     src/sampler.cpp
     src/vulkan_context.cpp
-    custom_layers/dynamic_framewise_group_norm.cpp
-    custom_layers/dynamic_framewise_spatial_attention.cpp
-    custom_layers/dynamic_space_time_shuffle.cpp
-    custom_layers/seedvr2_dit_input.cpp
-    custom_layers/seedvr2_dit_block.cpp
-    custom_layers/seedvr2_dit_output.cpp)
+    src/dynamic_framewise_group_norm.cpp
+    src/dynamic_framewise_spatial_attention.cpp
+    src/dynamic_space_time_shuffle.cpp
+    src/seedvr2_dit_input.cpp
+    src/seedvr2_dit_block.cpp
+    src/seedvr2_dit_output.cpp)
 target_include_directories(
     seedvr2_ncnn
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/custom_layers)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(seedvr2_ncnn PUBLIC ncnn)
 # 六个自定义层均已实现 forward_vkcompute，能力闸门随 Vulkan 构建开关打开；
 # 未开启 Vulkan 构建时保持 0，运行时仍拒绝 Vulkan 后端。
@@ -70,19 +70,19 @@ if(SEEDVR2_BUILD_TESTS)
     add_test(NAME seedvr2_runtime_unit_test COMMAND seedvr2_runtime_unit_test)
 
     add_executable(seedvr2_vae_dynamic_runner tests/vae_dynamic_runner.cpp)
-    target_include_directories(seedvr2_vae_dynamic_runner PRIVATE custom_layers)
+    target_include_directories(seedvr2_vae_dynamic_runner PRIVATE src)
     target_link_libraries(seedvr2_vae_dynamic_runner PRIVATE seedvr2_ncnn)
 
     add_executable(seedvr2_dit_input_runner tests/dit_input_runner.cpp)
-    target_include_directories(seedvr2_dit_input_runner PRIVATE custom_layers)
+    target_include_directories(seedvr2_dit_input_runner PRIVATE src)
     target_link_libraries(seedvr2_dit_input_runner PRIVATE seedvr2_ncnn)
 
     add_executable(seedvr2_dit_block_runner tests/dit_block_runner.cpp)
-    target_include_directories(seedvr2_dit_block_runner PRIVATE custom_layers)
+    target_include_directories(seedvr2_dit_block_runner PRIVATE src)
     target_link_libraries(seedvr2_dit_block_runner PRIVATE seedvr2_ncnn)
 
     add_executable(seedvr2_dit_output_runner tests/dit_output_runner.cpp)
-    target_include_directories(seedvr2_dit_output_runner PRIVATE custom_layers)
+    target_include_directories(seedvr2_dit_output_runner PRIVATE src)
     target_link_libraries(seedvr2_dit_output_runner PRIVATE seedvr2_ncnn)
 
     add_executable(seedvr2_dit_full_runner tests/dit_full_runner.cpp)
@@ -92,32 +92,32 @@ if(SEEDVR2_BUILD_TESTS)
     # Vulkan 自定义层数值对齐测试：仅在开启 Vulkan 时编译，避免 CPU 构建失败。
     if(SEEDVR2_ENABLE_VULKAN)
         add_executable(seedvr2_shuffle_vulkan_runner tests/shuffle_vulkan_runner.cpp)
-        target_include_directories(seedvr2_shuffle_vulkan_runner PRIVATE custom_layers)
+        target_include_directories(seedvr2_shuffle_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_shuffle_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_shuffle_vulkan_runner COMMAND seedvr2_shuffle_vulkan_runner)
 
         add_executable(seedvr2_groupnorm_vulkan_runner tests/groupnorm_vulkan_runner.cpp)
-        target_include_directories(seedvr2_groupnorm_vulkan_runner PRIVATE custom_layers)
+        target_include_directories(seedvr2_groupnorm_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_groupnorm_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_groupnorm_vulkan_runner COMMAND seedvr2_groupnorm_vulkan_runner)
 
         add_executable(seedvr2_attention_vulkan_runner tests/attention_vulkan_runner.cpp)
-        target_include_directories(seedvr2_attention_vulkan_runner PRIVATE custom_layers)
+        target_include_directories(seedvr2_attention_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_attention_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_attention_vulkan_runner COMMAND seedvr2_attention_vulkan_runner)
 
         add_executable(seedvr2_dit_input_vulkan_runner tests/dit_input_vulkan_runner.cpp)
-        target_include_directories(seedvr2_dit_input_vulkan_runner PRIVATE custom_layers)
+        target_include_directories(seedvr2_dit_input_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_dit_input_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_dit_input_vulkan_runner COMMAND seedvr2_dit_input_vulkan_runner)
 
         add_executable(seedvr2_dit_output_vulkan_runner tests/dit_output_vulkan_runner.cpp)
-        target_include_directories(seedvr2_dit_output_vulkan_runner PRIVATE custom_layers)
+        target_include_directories(seedvr2_dit_output_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_dit_output_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_dit_output_vulkan_runner COMMAND seedvr2_dit_output_vulkan_runner)
 
         add_executable(seedvr2_dit_block_vulkan_runner tests/dit_block_vulkan_runner.cpp)
-        target_include_directories(seedvr2_dit_block_vulkan_runner PRIVATE custom_layers)
+        target_include_directories(seedvr2_dit_block_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_dit_block_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_dit_block_vulkan_runner COMMAND seedvr2_dit_block_vulkan_runner)
 
@@ -126,7 +126,7 @@ if(SEEDVR2_BUILD_TESTS)
         add_test(NAME seedvr2_conv3d_vulkan_runner COMMAND seedvr2_conv3d_vulkan_runner)
 
         add_executable(seedvr2_perf_bench tests/perf_bench.cpp)
-        target_include_directories(seedvr2_perf_bench PRIVATE custom_layers)
+        target_include_directories(seedvr2_perf_bench PRIVATE src)
         target_link_libraries(seedvr2_perf_bench PRIVATE seedvr2_ncnn)
     endif()
 endif()

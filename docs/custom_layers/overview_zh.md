@@ -39,12 +39,12 @@ pnnx 按示例尺寸 trace，ncnn 原生算子按固定语义计算。逐层判�
 
 | 自定义层 | C++ | PyTorch 参考 |
 | --- | --- | --- |
-| FramewiseGroupNorm | `custom_layers/dynamic_framewise_group_norm.cpp` | `pytorch_model/models/video_vae_v3/modules/attn_video_vae.py`（ResnetBlock3D 的 GroupNorm） |
-| FramewiseSpatialAttention | `custom_layers/dynamic_framewise_spatial_attention.cpp` | 同上（VAE attention block） |
-| SpaceTimeShuffle | `custom_layers/dynamic_space_time_shuffle.cpp` | 同上（`Upsample3D`，upscale_ratio 处） |
-| DiTInput | `custom_layers/seedvr2_dit_input.cpp` | `pytorch_model/models/dit/patch.py`（`NaPatchIn`）+ `nadit.py`（timestep MLP） |
-| DiTBlock | `custom_layers/seedvr2_dit_block.cpp` | `pytorch_model/models/dit/nablocks/mmsr_block.py` + `blocks/mmdit_window_block.py` + `na.py` + `rope.py` |
-| DiTOutput | `custom_layers/seedvr2_dit_output.cpp` | `patch.py`（`NaPatchOut`）+ `mmsr_block.py` final layer |
+| FramewiseGroupNorm | `src/dynamic_framewise_group_norm.cpp` | `pytorch_model/models/video_vae_v3/modules/attn_video_vae.py`（ResnetBlock3D 的 GroupNorm） |
+| FramewiseSpatialAttention | `src/dynamic_framewise_spatial_attention.cpp` | 同上（VAE attention block） |
+| SpaceTimeShuffle | `src/dynamic_space_time_shuffle.cpp` | 同上（`Upsample3D`，upscale_ratio 处） |
+| DiTInput | `src/seedvr2_dit_input.cpp` | `pytorch_model/models/dit/patch.py`（`NaPatchIn`）+ `nadit.py`（timestep MLP） |
+| DiTBlock | `src/seedvr2_dit_block.cpp` | `pytorch_model/models/dit/nablocks/mmsr_block.py` + `blocks/mmdit_window_block.py` + `na.py` + `rope.py` |
+| DiTOutput | `src/seedvr2_dit_output.cpp` | `patch.py`（`NaPatchOut`）+ `mmsr_block.py` final layer |
 
 ### 0.3 全部自定义层共享的工程约定
 

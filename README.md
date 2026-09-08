@@ -106,8 +106,13 @@ src/
   preprocessing.cpp       视频预处理
   postprocessing.cpp      视频后处理
   vulkan_context.cpp      Vulkan/NCNN 运行时配置
+  dynamic_framewise_group_norm.*        自定义层：逐帧 GroupNorm
+  dynamic_framewise_spatial_attention.* 自定义层：空间注意力
+  dynamic_space_time_shuffle.*          自定义层：时空 Shuffle
+  seedvr2_dit_input.*     自定义层：DiT 输入投影
+  seedvr2_dit_block.*     自定义层：DiT Transformer block
+  seedvr2_dit_output.*    自定义层：DiT 输出投影
 
-custom_layers/            六个 SeedVR2 自定义层
 apps/seedvr2_cli.cpp      命令行入口
 tests/                    分层和完整推理 runner
 tools/                    导出、转换和数值对齐脚本

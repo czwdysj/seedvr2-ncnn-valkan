@@ -18,8 +18,8 @@
 对应实现：
 
 ```text
-custom_layers/seedvr2_dit_block.h
-custom_layers/seedvr2_dit_block.cpp
+src/seedvr2_dit_block.h
+src/seedvr2_dit_block.cpp
 cpp_runtime/dit_block_runner.cpp
 cpp_runtime/dit_full_runner.cpp
 ```
