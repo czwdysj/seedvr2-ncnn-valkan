@@ -148,6 +148,14 @@ int run(bool use_vulkan, const TestCase& tc, ncnn::Mat out[2])
         return -1;
     }
 
+    if (use_vulkan)
+    {
+        auto* layer = dynamic_cast<SeedVR2DiTOutput*>(net.mutable_layers().back());
+        if (!layer)
+            return -1;
+        layer->set_runtime_shape(tc.T, tc.H, tc.W);
+    }
+
     ncnn::Extractor ex = net.create_extractor();
     const int r_in0 = ex.input("vid", video);
     const int r_in1 = ex.input("emb", embedding);

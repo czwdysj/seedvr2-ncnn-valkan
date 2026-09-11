@@ -26,6 +26,10 @@ public:
                 std::vector<ncnn::Mat>& top_blobs,
                 const ncnn::Option& opt) const override;
 
+    // Vulkan shader 的分派尺寸和时间编码来自调用方已知的 CPU 元数据。
+    // 显式注入后，forward 不需要为了读取四个标量而下载 VkMat 并等待 GPU。
+    void set_runtime_metadata(int frames, int height, int width, float timestep);
+
 #if NCNN_VULKAN
     int upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt) override;
     int forward(const std::vector<ncnn::VkMat>& bottom_blobs,
@@ -48,6 +52,11 @@ private:
     ncnn::Layer* time_projection_in;
     ncnn::Layer* time_projection_hidden;
     ncnn::Layer* time_projection_out;
+    int runtime_frames;
+    int runtime_height;
+    int runtime_width;
+    float runtime_timestep;
+    bool runtime_metadata_valid;
 
 #if NCNN_VULKAN
     // 三个自定义 compute shader 的管线（矩阵乘走原生 InnerProduct 的 Vulkan 实现）。

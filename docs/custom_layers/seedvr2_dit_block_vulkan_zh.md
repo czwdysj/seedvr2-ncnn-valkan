@@ -36,7 +36,7 @@
 
 ## 3. 实现方法
 
-### 3.1 总体结构：7 个 shader + 5 个 InnerProduct 复用
+### 3.1 总体结构：8 个 shader + 5 个 InnerProduct 复用
 
 ```
 rmsnorm_reduce（逐 token 平方和归约）      ┐
@@ -45,6 +45,7 @@ qkv_prepare（MM-RoPE 旋转 + bf16 舍入）    │
 attention（softmax 三遍 QK^T @ V）         ├─ 核心难点
 ada_residual（门控/普通/两倍残差）         │
 silu（SwiGLU 门控）                        │
+zero_buffer（窗口稀疏 workspace 清零）      │
 window_sum（跨窗口归约）                   ┘
 + qkv/proj_out/mlp_gate_proj/mlp_in_proj/mlp_out_proj（复用 InnerProduct）
 ```
@@ -212,6 +213,12 @@ PyTorch 在 attention 前显式 `.bfloat16()`，用的是 **round-to-nearest tie
 - **视频**：非 shifted 时每个 token 只在一个窗口；shifted 时一个 token 跨多个窗口，结果要**累加**（不平均）。
 
 两种不同的跨窗口归约语义，需要分开处理（window_sum 的 has_divide flag），且 shifted 的视频累加不能简单用「直接写」（会覆盖而非累加），必须用独立窗口 buffer + 最后 sum。
+
+每个窗口只写 `vid_out_ws` 中属于自己的 token，其他位置也会被 `window_sum`
+读取，因此不能假设新分配的 GPU 内存天然为零。DiT 改为跨 block 共享 allocator
+后，旧 workspace 会被稳定复用，未初始化值会直接污染 attention。当前实现先用
+`zero_buffer` shader 清空 `vid_out_ws`，再执行逐窗口 attention 和归约；这既是
+正确性要求，也是零拷贝调度能够成立的前提。
 
 ### 4.5 难点 5：动态窗口的变长序列
 

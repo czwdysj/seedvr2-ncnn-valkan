@@ -29,6 +29,10 @@ public:
         std::vector<ncnn::Mat>& top_blobs,
         const ncnn::Option& opt) const override;
 
+    // 窗口划分只依赖 patch 后的 T/H/W；由 DiT 调度器在执行前注入，避免
+    // 每个 Transformer block 都把 vid_shape 从 GPU 下载回 CPU。
+    void set_runtime_shape(int frames, int height, int width);
+
 #if NCNN_VULKAN
     int upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt) override;
     int forward(
@@ -118,6 +122,10 @@ private:
     int head_dim;
     int mlp_hidden;
     float norm_eps;
+    int runtime_frames;
+    int runtime_height;
+    int runtime_width;
+    bool runtime_shape_valid;
     BranchWeights vid_weights;
     BranchWeights txt_weights;
     ncnn::Mat rope_freqs;
@@ -131,6 +139,7 @@ private:
     ncnn::Pipeline* pipeline_attention;
     ncnn::Pipeline* pipeline_ada_residual;
     ncnn::Pipeline* pipeline_silu;
+    ncnn::Pipeline* pipeline_zero_buffer;
     ncnn::Pipeline* pipeline_text_normalize;
 #endif
 };

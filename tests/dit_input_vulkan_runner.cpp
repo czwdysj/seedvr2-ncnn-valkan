@@ -154,6 +154,14 @@ int run(bool use_vulkan, const TestCase& tc, ncnn::Mat out[4])
         return -1;
     }
 
+    if (use_vulkan)
+    {
+        auto* layer = dynamic_cast<SeedVR2DiTInput*>(net.mutable_layers().back());
+        if (!layer)
+            return -1;
+        layer->set_runtime_metadata(tc.T, tc.H, tc.W, 0.7f);
+    }
+
     ncnn::Extractor ex = net.create_extractor();
     const int r_in0 = ex.input("vid", video);
     const int r_in1 = ex.input("txt", text);

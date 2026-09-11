@@ -25,6 +25,10 @@ public:
                 std::vector<ncnn::Mat>& top_blobs,
                 const ncnn::Option& opt) const override;
 
+    // unpatchify 的输出尺寸由 DiT 调度器直接注入，Vulkan forward 不再下载
+    // vid_shape，也不会在输出头之前强制提交整条命令队列。
+    void set_runtime_shape(int frames, int height, int width);
+
 #if NCNN_VULKAN
     int upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt) override;
     int forward(const std::vector<ncnn::VkMat>& bottom_blobs,
@@ -41,6 +45,10 @@ private:
     ncnn::Mat output_shift;
     ncnn::Mat output_scale;
     ncnn::Layer* projection;
+    int runtime_frames;
+    int runtime_height;
+    int runtime_width;
+    bool runtime_shape_valid;
 
 #if NCNN_VULKAN
     // 三个调制权重的 GPU 缓冲（upload_model 一次性上传，forward 零搬运）。

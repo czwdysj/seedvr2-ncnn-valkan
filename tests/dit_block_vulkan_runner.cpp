@@ -174,6 +174,14 @@ int run(bool use_vulkan, const TestCase& tc, ncnn::Mat out[2])
         return -1;
     }
 
+    if (use_vulkan)
+    {
+        auto* layer = dynamic_cast<SeedVR2DiTBlock*>(net.mutable_layers().back());
+        if (!layer)
+            return -1;
+        layer->set_runtime_shape(tc.T, tc.H, tc.W);
+    }
+
     ncnn::Extractor ex = net.create_extractor();
     const int r0 = ex.input("vid", vid);
     const int r1 = ex.input("txt", txt);

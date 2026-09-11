@@ -161,7 +161,8 @@ SeedVR2DiTInput::SeedVR2DiTInput()
     : dim(2560), video_channels(33), text_channels(5120), sinusoidal_dim(256),
       embedding_dim(15360), video_projection(nullptr), text_projection(nullptr),
       time_projection_in(nullptr), time_projection_hidden(nullptr),
-      time_projection_out(nullptr)
+      time_projection_out(nullptr), runtime_frames(0), runtime_height(0),
+      runtime_width(0), runtime_timestep(0.f), runtime_metadata_valid(false)
 {
     one_blob_only = false;
     support_inplace = false;
@@ -173,6 +174,16 @@ SeedVR2DiTInput::SeedVR2DiTInput()
     pipeline_sinusoidal = 0;
     pipeline_silu = 0;
 #endif
+}
+
+void SeedVR2DiTInput::set_runtime_metadata(
+    int frames, int height, int width, float timestep)
+{
+    runtime_frames = frames;
+    runtime_height = height;
+    runtime_width = width;
+    runtime_timestep = timestep;
+    runtime_metadata_valid = frames > 0 && height > 0 && width > 0;
 }
 
 SeedVR2DiTInput::~SeedVR2DiTInput()
@@ -426,24 +437,14 @@ int SeedVR2DiTInput::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         || text.w != text_channels || timestep.w < 1 || shape.w != 3)
         return -1;
 
-    // shape 存 int 位模式、timestep 存 float。它们是极小的标量/形状数据，
-    // 需要 CPU 侧同步读取（作为 patchify/sinusoidal 的 push constant）。
-    // 注意：不能直接 mapped_ptr 读，因为 record_upload 的 convert_packing 是
-    // 异步记录的，forward 时 dst buffer 尚未写入。这里用 record_download 下载到
-    // CPU 后 submit_and_wait 同步等待，保证读到最新值（正确性优先阶段可接受，
-    // 数据量仅 4 个标量）。
-    ncnn::Mat shape_cpu;
-    ncnn::Mat timestep_cpu;
-    cmd.record_download(shape, shape_cpu, opt);
-    cmd.record_download(timestep, timestep_cpu, opt);
-    cmd.submit_and_wait();
-    cmd.reset();
-
-    const int* shape_data = static_cast<const int*>(shape_cpu.data);
-    const float timestep_val = static_cast<const float*>(timestep_cpu.data)[0];
-    const int frames = shape_data[0];
-    const int height = shape_data[1];
-    const int width = shape_data[2];
+    // shape/timestep 仍保留为图输入以兼容既有 param，但 shader 分派使用调度器
+    // 注入的 CPU 元数据。这样不会为了四个标量打断连续 Vulkan 命令流。
+    if (!runtime_metadata_valid)
+        return -1;
+    const float timestep_val = runtime_timestep;
+    const int frames = runtime_frames;
+    const int height = runtime_height;
+    const int width = runtime_width;
     if (frames <= 0 || height <= 0 || width <= 0 || height % 2 != 0 || width % 2 != 0)
         return -1;
     const int patched_height = height / 2;

@@ -1,14 +1,18 @@
 // 本文件是正式 SeedVR2DiT 类的端到端数值测试入口。
 // 它兼容旧验证脚本的 [L,33] raw 参数，把输入还原成 [33,T,H,W] 后调用库 API，
-// 再把 [16,T,H,W] 输出展平写回。32 层调度不再复制在 runner 中。
+// 再把 [16,T,H,W] 输出展平写回。SEEDVR2_DEVICE=vulkan 可验证 VkMat 连续
+// 调度，SEEDVR2_DIT_RESIDENT=1 可切换 32 层常驻模式并输出边界传输审计。
 #include "model/dit.h"
 #include "core/runtime_context.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -84,6 +88,11 @@ int main(int argc, char** argv)
 
     seedvr2::RuntimeOptions options;
     options.num_threads = 8;
+    const char* device = std::getenv("SEEDVR2_DEVICE");
+    const char* resident = std::getenv("SEEDVR2_DIT_RESIDENT");
+    if (device && std::string(device) == "vulkan")
+        options.device = seedvr2::DeviceType::Vulkan;
+    options.dit_resident = resident && std::string(resident) == "1";
     seedvr2::RuntimeContext context;
     std::string error;
     if (context.initialize(options, error) != 0)
@@ -97,19 +106,40 @@ int main(int argc, char** argv)
         std::cerr << dit.last_error() << '\n';
         return 5;
     }
+    const char* warmup_value = std::getenv("SEEDVR2_WARMUP");
+    const char* repeat_value = std::getenv("SEEDVR2_REPEAT");
+    const int warmup = warmup_value ? std::max(0, std::atoi(warmup_value)) : 0;
+    const int repeat = repeat_value ? std::max(1, std::atoi(repeat_value)) : 1;
+    const ncnn::Mat latent = unflatten(flat_video, frames, height, width);
     ncnn::Mat output;
-    if (dit.forward(unflatten(flat_video, frames, height, width),
-                    text,
-                    std::strtof(argv[7], nullptr),
-                    output)
-        != 0)
+    std::vector<double> elapsed_ms;
+    for (int iteration = -warmup; iteration < repeat; ++iteration)
     {
-        std::cerr << dit.last_error() << '\n';
-        return 6;
+        const auto begin = std::chrono::steady_clock::now();
+        if (dit.forward(latent, text, std::strtof(argv[7], nullptr), output) != 0)
+        {
+            std::cerr << dit.last_error() << '\n';
+            return 6;
+        }
+        const auto end = std::chrono::steady_clock::now();
+        if (iteration >= 0)
+            elapsed_ms.push_back(std::chrono::duration<double, std::milli>(end - begin).count());
     }
     if (!write_matrix(argv[11], flatten(output)))
         return 7;
     std::cout << "DiT complete: C,T,H,W=" << output.c << ',' << output.d << ','
               << output.h << ',' << output.w << '\n';
+    std::sort(elapsed_ms.begin(), elapsed_ms.end());
+    std::cout << "DiT timing: warmup=" << warmup << " repeat=" << repeat
+              << " median_ms=" << elapsed_ms[elapsed_ms.size() / 2] << '\n';
+    if (options.device == seedvr2::DeviceType::Vulkan)
+    {
+        const seedvr2::DiTVulkanTransferStats& stats = dit.last_vulkan_transfer_stats();
+        std::cout << "Vulkan transfer audit: entry_upload_commands="
+                  << stats.entry_upload_commands
+                  << " intermediate_download_commands=" << stats.intermediate_download_commands
+                  << " final_download_commands=" << stats.final_download_commands
+                  << " queue_submissions=" << stats.queue_submissions << '\n';
+    }
     return 0;
 }

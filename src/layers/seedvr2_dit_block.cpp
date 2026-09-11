@@ -5,10 +5,10 @@
 // 完全相同的窗口索引和权重布局，避免 CPU/GPU 两套语义发生偏差。
 //
 // Vulkan 路径：5 个矩阵乘投影复用 InnerProduct（Layer_final 委托），自定义
-// 代码负责 7 个 compute shader——rmsnorm_reduce/rmsnorm_apply（逐 token RMSNorm
+// 代码负责 8 个 compute shader——rmsnorm_reduce/rmsnorm_apply（逐 token RMSNorm
 // + adaLN 调制，reduce+apply 两段）、qkv_prepare（MM-RoPE 旋转 + bf16 舍入）、
 // attention（softmax 三遍 QK^T，不物化 scores）、ada_residual（门控残差）、
-// silu（SwiGLU 门控）、text_normalize（文本跨窗口平均）。
+// silu（SwiGLU 门控）、zero_buffer（窗口稀疏区清零）和 window_sum（跨窗口归约）。
 #include "layers/seedvr2_dit_block.h"
 
 #include <algorithm>
@@ -430,6 +430,25 @@ void main()
 }
 )VKGLSL";
 
+// attention 每个窗口只写 vid_out_ws 中属于该窗口的 token。共享 allocator 会
+// 复用旧显存，未覆盖区域不能假定为零，因此归约前必须显式清空整个稀疏缓冲。
+static const char* block_zero_buffer_shader_source = R"VKGLSL(
+#version 450
+
+layout(binding = 0, std430) writeonly buffer output_data { sfp output_blob[]; };
+
+layout(push_constant) uniform parameter {
+    uint total;
+} p;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.total)
+        buffer_st1(output_blob, i, 0.0);
+}
+)VKGLSL";
+
 // ============================================================================
 // shader 5：ada_residual —— 输出调制（门控残差 / 普通残差 / 两倍，三模式）
 // ============================================================================
@@ -556,7 +575,11 @@ SeedVR2DiTBlock::SeedVR2DiTBlock()
       heads(20),
       head_dim(128),
       mlp_hidden(6912),
-      norm_eps(1e-5f)
+      norm_eps(1e-5f),
+      runtime_frames(0),
+      runtime_height(0),
+      runtime_width(0),
+      runtime_shape_valid(false)
 {
     one_blob_only = false;
     support_inplace = false;
@@ -570,8 +593,17 @@ SeedVR2DiTBlock::SeedVR2DiTBlock()
     pipeline_attention = 0;
     pipeline_ada_residual = 0;
     pipeline_silu = 0;
+    pipeline_zero_buffer = 0;
     pipeline_text_normalize = 0;
 #endif
+}
+
+void SeedVR2DiTBlock::set_runtime_shape(int frames, int height, int width)
+{
+    runtime_frames = frames;
+    runtime_height = height;
+    runtime_width = width;
+    runtime_shape_valid = frames > 0 && height > 0 && width > 0;
 }
 
 SeedVR2DiTBlock::~SeedVR2DiTBlock()
@@ -690,6 +722,7 @@ int SeedVR2DiTBlock::create_pipeline(const ncnn::Option &opt)
     if ((ret = compile(block_attention_shader_source, pipeline_attention, 64, "attention")) != 0) return ret;
     if ((ret = compile(block_ada_residual_shader_source, pipeline_ada_residual, 64, "ada_residual")) != 0) return ret;
     if ((ret = compile(block_silu_shader_source, pipeline_silu, 64, "silu")) != 0) return ret;
+    if ((ret = compile(block_zero_buffer_shader_source, pipeline_zero_buffer, 64, "zero_buffer")) != 0) return ret;
     if ((ret = compile(block_window_sum_shader_source, pipeline_text_normalize, 64, "window_sum")) != 0) return ret;
 #endif
     return 0;
@@ -715,6 +748,7 @@ int SeedVR2DiTBlock::destroy_pipeline(const ncnn::Option &opt)
     delete pipeline_attention; pipeline_attention = 0;
     delete pipeline_ada_residual; pipeline_ada_residual = 0;
     delete pipeline_silu; pipeline_silu = 0;
+    delete pipeline_zero_buffer; pipeline_zero_buffer = 0;
     delete pipeline_text_normalize; pipeline_text_normalize = 0;
 #endif
     return 0;
@@ -1194,15 +1228,13 @@ int SeedVR2DiTBlock::forward(
         || embedding.w != dim * 6 || vid_shape.w != 3)
         return -1;
 
-    // shape 存 int 位模式，同步读取（同 DiTInput/DiTOutput）。
-    ncnn::Mat shape_cpu;
-    cmd.record_download(vid_shape, shape_cpu, opt);
-    cmd.submit_and_wait();
-    cmd.reset();
-    const int* shape_data = static_cast<const int*>(shape_cpu.data);
-    const int frames = shape_data[0];
-    const int height = shape_data[1];
-    const int width = shape_data[2];
+    // 窗口边界由 CPU 生成，但形状在进入 DiT 前已经确定。直接使用调度器注入值，
+    // 避免 32 个 block 各自下载 vid_shape 并打断连续 Vulkan 命令流。
+    if (!runtime_shape_valid)
+        return -1;
+    const int frames = runtime_frames;
+    const int height = runtime_height;
+    const int width = runtime_width;
     if (frames <= 0 || height <= 0 || width <= 0 || vid.h != frames * height * width)
         return -1;
     const int video_tokens = frames * height * width;
@@ -1352,6 +1384,21 @@ int SeedVR2DiTBlock::forward(
     ncnn::VkMat txt_out_ws(window_count * text_length * dim, 4u, 1, opt.workspace_vkallocator);
     if (q_ws.empty() || k_ws.empty() || v_ws.empty() || vid_out_ws.empty() || txt_out_ws.empty())
         return -100;
+
+    // 每个窗口段只覆盖自己的视频 token；其余位置参与 window_sum 前必须为零。
+    // 跨 Net 共享 allocator 后显存会稳定复用，因此不能依赖新分配内存恰好为零。
+    {
+        std::vector<ncnn::VkMat> bindings(1);
+        bindings[0] = vid_out_ws;
+        const uint32_t total = static_cast<uint32_t>(window_count) * video_tokens * dim;
+        std::vector<ncnn::vk_constant_type> constants(1);
+        constants[0].u32 = total;
+        ncnn::VkMat dispatcher;
+        dispatcher.w = total;
+        dispatcher.h = 1;
+        dispatcher.c = 1;
+        cmd.record_pipeline(pipeline_zero_buffer, bindings, constants, dispatcher);
+    }
 
     const float attention_scale = 1.f / std::sqrt(static_cast<float>(head_dim));
     for (int wi = 0; wi < window_count; wi++)

@@ -14,6 +14,14 @@
 
 namespace seedvr2
 {
+struct DiTVulkanTransferStats
+{
+    int entry_upload_commands = 0;
+    int final_download_commands = 0;
+    int intermediate_download_commands = 0;
+    int queue_submissions = 0;
+};
+
 class SeedVR2DiT
 {
 public:
@@ -26,7 +34,20 @@ public:
                 float timestep,
                 ncnn::Mat& output);
 
+#if NCNN_VULKAN
+    // 单次 DiT 的 Vulkan 边界接口：入口集中上传，input/32 blocks/output 全程
+    // 传递 VkMat，最后只下载一次输出。公开 Engine API 仍保持不变。
+    int forward_vulkan(const ncnn::Mat& latent,
+                       const ncnn::Mat& text,
+                       float timestep,
+                       ncnn::Mat& output);
+#endif
+
     const std::string& last_error() const noexcept { return last_error_; }
+    const DiTVulkanTransferStats& last_vulkan_transfer_stats() const noexcept
+    {
+        return last_vulkan_transfer_stats_;
+    }
 
 private:
     int run_block(int index,
@@ -37,6 +58,22 @@ private:
                   ncnn::Mat& video_output,
                   ncnn::Mat& text_output);
 
+#if NCNN_VULKAN
+    int run_block_vulkan(int index,
+                         const ncnn::VkMat& video,
+                         const ncnn::VkMat& text,
+                         const ncnn::VkMat& embedding,
+                         const ncnn::VkMat& shape,
+                         int frames,
+                         int height,
+                         int width,
+                         ncnn::VkAllocator* blob_allocator,
+                         ncnn::VkAllocator* staging_allocator,
+                         ncnn::VkCompute& command,
+                         ncnn::VkMat& video_output,
+                         ncnn::VkMat& text_output);
+#endif
+
     const RuntimeContext* context_ = nullptr;
     std::string model_dir_;
     std::unique_ptr<ncnn::Net> input_;
@@ -46,5 +83,6 @@ private:
     std::vector<std::unique_ptr<ncnn::Net>> blocks_;
     bool resident_ = false;
     std::string last_error_;
+    DiTVulkanTransferStats last_vulkan_transfer_stats_;
 };
 } // namespace seedvr2

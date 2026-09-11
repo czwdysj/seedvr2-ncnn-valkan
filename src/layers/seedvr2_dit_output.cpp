@@ -223,7 +223,8 @@ void main()
 #endif // NCNN_VULKAN
 
 SeedVR2DiTOutput::SeedVR2DiTOutput()
-    : dim(2560), output_channels(16), norm_eps(1e-5f), projection(nullptr)
+    : dim(2560), output_channels(16), norm_eps(1e-5f), projection(nullptr),
+      runtime_frames(0), runtime_height(0), runtime_width(0), runtime_shape_valid(false)
 {
     one_blob_only = false;
     support_inplace = false;
@@ -235,6 +236,14 @@ SeedVR2DiTOutput::SeedVR2DiTOutput()
     pipeline_norm_apply = 0;
     pipeline_unpatchify = 0;
 #endif
+}
+
+void SeedVR2DiTOutput::set_runtime_shape(int frames, int height, int width)
+{
+    runtime_frames = frames;
+    runtime_height = height;
+    runtime_width = width;
+    runtime_shape_valid = frames > 0 && height > 0 && width > 0;
 }
 
 SeedVR2DiTOutput::~SeedVR2DiTOutput()
@@ -450,20 +459,13 @@ int SeedVR2DiTOutput::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
     if (video.dims != 2 || video.w != dim || embedding.w != dim * 6 || shape.w != 3)
         return -1;
 
-    // shape 存 int 位模式，是极小的形状数据，需 CPU 侧同步读取（作为各 shader
-    // 的 push constant 与输出形状）。注意：不能直接 mapped_ptr 读，因为
-    // record_upload 的 convert_packing 是异步记录的，forward 时 dst buffer 尚未
-    // 写入。这里用 record_download + submit_and_wait + reset 同步等待（正确性
-    // 优先阶段可接受，数据量仅 3 个标量）。
-    ncnn::Mat shape_cpu;
-    cmd.record_download(shape, shape_cpu, opt);
-    cmd.submit_and_wait();
-    cmd.reset();
-
-    const int* shape_data = static_cast<const int*>(shape_cpu.data);
-    const int frames = shape_data[0];
-    const int height = shape_data[1];
-    const int width = shape_data[2];
+    // 输出形状由调度器在 CPU 侧已知并注入；shape blob 仅为 param 兼容保留。
+    // 删除此处下载后，output head 可以紧接第 31 个 block 在同一命令流执行。
+    if (!runtime_shape_valid)
+        return -1;
+    const int frames = runtime_frames;
+    const int height = runtime_height;
+    const int width = runtime_width;
     if (frames <= 0 || height <= 0 || width <= 0 || video.h != frames * height * width)
         return -1;
     const int tokens = frames * height * width;
