@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <random>
 #include <utility>
@@ -124,6 +126,30 @@ ncnn::Mat make_dit_input(const ncnn::Mat& noise, const ncnn::Mat& condition)
             }
     return result;
 }
+
+// 读取模型目录可选携带的默认文本 embedding（default_pos_emb.bin / default_neg_emb.bin，
+// 由 tools/export_default_embeddings.py 从官方 pos_emb.pt / neg_emb.pt 转出）。
+// 文件布局：int32 tokens | int32 channels | fp32 data[tokens*channels]。
+bool read_default_embedding(const std::filesystem::path& path, TextEmbedding& embedding)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream)
+        return false;
+    std::int32_t header[2] = {0, 0};
+    stream.read(reinterpret_cast<char*>(header), sizeof(header));
+    if (!stream || header[0] <= 0 || header[1] != 5120)
+        return false;
+    TextEmbedding loaded;
+    loaded.tokens = header[0];
+    loaded.channels = header[1];
+    loaded.data.resize(static_cast<std::size_t>(loaded.tokens) * loaded.channels);
+    stream.read(reinterpret_cast<char*>(loaded.data.data()),
+                static_cast<std::streamsize>(loaded.data.size() * sizeof(float)));
+    if (!stream || !loaded.valid())
+        return false;
+    embedding = std::move(loaded);
+    return true;
+}
 } // namespace
 
 class SeedVR2Engine::Impl
@@ -153,6 +179,10 @@ public:
 
         options = context.options();
         sampler = std::make_unique<EulerSampler>(options.sampling_steps);
+        // 方案 A：模型目录可选携带官方默认文本 embedding；存在则加载，允许调用方
+        // process() 传空 embedding 直接使用默认文本条件（开箱即用，无 PyTorch 依赖）。
+        read_default_embedding(root / "default_pos_emb.bin", default_positive);
+        read_default_embedding(root / "default_neg_emb.bin", default_negative);
         is_loaded = true;
         error.clear();
         return static_cast<int>(Status::Ok);
@@ -165,10 +195,18 @@ public:
     {
         if (!is_loaded)
             return fail(Status::NotLoaded, "engine is not loaded");
-        if (!positive.valid() || positive.channels != 5120)
-            return fail(Status::InvalidArgument, "positive embedding must be [tokens,5120]");
+        // 调用方传空 embedding 时回退到模型目录内的默认文本条件。
+        TextEmbedding positive_used = positive;
+        if (!positive_used.valid() && default_positive.valid())
+            positive_used = default_positive;
+        TextEmbedding negative_used = negative;
+        if (!negative_used.valid() && default_negative.valid())
+            negative_used = default_negative;
+        if (!positive_used.valid() || positive_used.channels != 5120)
+            return fail(Status::InvalidArgument,
+                        "positive embedding is empty and model dir has no default_pos_emb.bin");
         if (options.cfg_scale != 1.0f
-            && (!negative.valid() || negative.channels != 5120))
+            && (!negative_used.valid() || negative_used.channels != 5120))
             return fail(Status::InvalidArgument,
                         "negative embedding must be [tokens,5120] when CFG is enabled");
 
@@ -202,8 +240,9 @@ public:
             return fail(Status::OutOfMemory, "failed to allocate diffusion noise");
         const ncnn::Mat condition =
             make_condition_latent(encoded, augment_noise, options.condition_noise_scale);
-        const ncnn::Mat positive_text = make_text_mat(positive);
-        const ncnn::Mat negative_text = options.cfg_scale == 1.0f ? ncnn::Mat() : make_text_mat(negative);
+        const ncnn::Mat positive_text = make_text_mat(positive_used);
+        const ncnn::Mat negative_text =
+            options.cfg_scale == 1.0f ? ncnn::Mat() : make_text_mat(negative_used);
         if (condition.empty() || positive_text.empty()
             || (options.cfg_scale != 1.0f && negative_text.empty()))
             return fail(Status::OutOfMemory, "failed to allocate DiT condition tensors");
@@ -286,6 +325,8 @@ public:
     SeedVR2VAE vae;
     SeedVR2DiT dit;
     std::unique_ptr<EulerSampler> sampler;
+    TextEmbedding default_positive;
+    TextEmbedding default_negative;
     bool is_loaded = false;
     std::string error;
 };

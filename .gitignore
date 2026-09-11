@@ -43,3 +43,7 @@ lightning_logs/
 *.tar.gz
 *.vsix
 *.mp4
+
+# ---- Assembled model directory (created by download-models.sh) ----
+/models/
+/embeddings/out/

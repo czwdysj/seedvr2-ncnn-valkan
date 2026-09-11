@@ -1,3 +1,23 @@
+From 9c65e7d8b61a93e62d6e779e990cfe9d298e3424 Mon Sep 17 00:00:00 2001
+From: czvv <t2026100069911305@eduxiji.net>
+Date: Mon, 7 Sep 2026 20:10:52 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?fix:=20=E4=BF=AE=E5=A4=8D=E5=A4=9A=E6=A0=B8?=
+ =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E5=99=A8=E4=B8=8A=20get=5Fdata=5Fcache=5Fsiz?=
+ =?UTF-8?q?e=20=E7=9A=84=20CPU=20=E4=BD=8D=E5=9B=BE=E8=A7=A3=E6=9E=90?=
+ =?UTF-8?q?=E4=B8=8E=E9=99=A4=E9=9B=B6=E5=B4=A9=E6=BA=83?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Linux sysfs 的 shared_cpu_map 位图以逗号分隔 32 位十六进制组，原解析把
+  逗号当十六进制字符导致跨组后位偏移错位，多核服务器上共享核数统计为 0，
+  触发下方除零（SIGFPE）；
+- 跳过逗号且不推进位偏移；thread_siblings 全部解析失败时按未共享口径返回，
+  避免 shared_physical_cpu_count=0 的除法崩溃。
+---
+ src/cpu.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
 diff --git a/src/cpu.cpp b/src/cpu.cpp
 index 86c44708..5ab36d47 100644
 --- a/src/cpu.cpp
@@ -28,3 +48,6 @@ index 86c44708..5ab36d47 100644
      cache_size_K = (cache_size_K / shared_physical_cpu_count + 3) / 4 * 4;
  
      return cache_size_K * 1024;
+-- 
+2.43.0
+

@@ -1,0 +1,359 @@
+From 68f5696bafaf72f2e481dba5654eb5141d0f315f Mon Sep 17 00:00:00 2001
+From: czvv <t2026100069911305@eduxiji.net>
+Date: Mon, 7 Sep 2026 20:10:43 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat:=20=E4=B8=BA=20Convolution3D=20?=
+ =?UTF-8?q?=E5=A2=9E=E5=8A=A0=20Vulkan=20=E5=90=8E=E7=AB=AF=EF=BC=88pack1?=
+ =?UTF-8?q?=20=E7=9B=B4=E6=8E=A5=E5=8D=B7=E7=A7=AF=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 Convolution3D_vulkan，继承 Convolution3D，support_vulkan=true、
+  support_vulkan_packing=false（标量布局）；
+- shader 以内嵌字符串携带，create_pipeline 用 compile_spirv_module 编译，
+  每个 work item 计算一个输出元素，遍历 kernel 邻域与全部输入通道，边界
+  判断填 pad_value（等价于 CPU make_padding 后直接卷积）；
+- forward 将 SAME padding（-233/-234）折算为显式 pad 量；
+- 输出寻址用 cstep 对齐（VkMat 4D 通道间有 padding，非稠密）；
+- 注册机制：ncnn_add_layer 自动检测 layer/vulkan/convolution3d_vulkan.cpp
+  存在即注册 Convolution3D_vulkan_layer_creator，无需手动改注册表；
+- activation_type != 0（融合激活）暂回退 CPU，SeedVR2 VAE 的 3D 卷积均为
+  无激活，不受影响。
+
+验证：seedvr2 项目 tests/conv3d_vulkan_runner.cpp 5 组参数（3x3x3/1x1x1、
+stride 1/2、dilation、显式/SAME pad、多通道、非4倍数 cstep）全部
+max|diff|=0 通过。
+---
+ src/layer/vulkan/convolution3d_vulkan.cpp | 274 ++++++++++++++++++++++
+ src/layer/vulkan/convolution3d_vulkan.h   |  38 +++
+ 2 files changed, 312 insertions(+)
+ create mode 100644 src/layer/vulkan/convolution3d_vulkan.cpp
+ create mode 100644 src/layer/vulkan/convolution3d_vulkan.h
+
+diff --git a/src/layer/vulkan/convolution3d_vulkan.cpp b/src/layer/vulkan/convolution3d_vulkan.cpp
+new file mode 100644
+index 00000000..66f5de15
+--- /dev/null
++++ b/src/layer/vulkan/convolution3d_vulkan.cpp
+@@ -0,0 +1,274 @@
++// Copyright 2021 Tencent
++// SPDX-License-Identifier: BSD-3-Clause
++
++#include "convolution3d_vulkan.h"
++
++#include "layer_type.h"
++#include "layer_shader_type.h"
++
++#include <vector>
++
++namespace ncnn {
++
++// ============================================================================
++// Convolution3D 的 Vulkan compute shader（pack1 直接卷积）
++// ============================================================================
++// 每个 work item 计算一个输出元素 (p, z_out, i_out, j_out)，遍历 kernel 邻域
++// （kd×kh×kw）与全部输入通道。边界用 if 判断：越界填 pad_value，等价于 CPU
++// 侧 make_padding 后直接卷积。与 CPU 逐元素等价：
++//   out[p][z][i][j] = bias[p] + Σ_q Σ_{kd,kh,kw}
++//       input[q][z*stride_d+kd*dilation_d-pad_front]
++//             [i*stride_h+kh*dilation_h-pad_top]
++//             [j*stride_w+kw*dilation_w-pad_left]
++//       * weight[p][q][kd][kh][kw]
++//
++// 布局约定（对齐 ncnn 内置 shader）：
++//   - 输入输出 pack1，sfp 类型 + buffer_ld1/st1 读写，afp 累加；
++//   - 4D 地址 = c*cstep + d*(h*w) + y*w + x（c 最外层，cstep 对齐）；
++//   - weight 布局 [num_output, channels, maxk]，maxk 内 (kd,kh,kw) 顺序。
++static const char* convolution3d_shader_source = R"VKGLSL(
++#version 450
++
++layout(binding = 0, std430) readonly buffer bottom_data { sfp bottom_blob[]; };
++layout(binding = 1, std430) writeonly buffer top_data { sfp top_blob[]; };
++layout(binding = 2, std430) readonly buffer weight_data { sfp weight_blob[]; };
++layout(binding = 3, std430) readonly buffer bias_data { sfp bias_blob[]; };
++
++layout(push_constant) uniform parameter {
++    uint w;
++    uint h;
++    uint d;
++    uint channels;
++    uint cstep;
++    uint outw;
++    uint outh;
++    uint outd;
++    uint num_output;
++    uint kernel_w;
++    uint kernel_h;
++    uint kernel_d;
++    uint stride_w;
++    uint stride_h;
++    uint stride_d;
++    uint dilation_w;
++    uint dilation_h;
++    uint dilation_d;
++    uint pad_left;
++    uint pad_top;
++    uint pad_front;
++    uint maxk;
++    uint bias_term;
++    float pad_value;
++    uint out_cstep;
++    uint total;
++} p;
++
++void main()
++{
++    uint gi = gl_GlobalInvocationID.x;
++    if (gi >= p.total)
++        return;
++
++    // 解码稠密索引 gi 为 (p, z_out, i_out, j_out)。
++    uint spatial_out = p.outw * p.outh * p.outd;
++    uint p_out = gi / spatial_out;
++    uint rem = gi % spatial_out;
++    uint z_out = rem / (p.outh * p.outw);
++    uint rem2 = rem % (p.outh * p.outw);
++    uint i_out = rem2 / p.outw;
++    uint j_out = rem2 % p.outw;
++
++    // 输出地址用 cstep 对齐（VkMat 4D 通道间有 padding，非稠密）。
++    uint out_addr = p_out * p.out_cstep + z_out * (p.outh * p.outw) + i_out * p.outw + j_out;
++
++    afp sum = 0.0;
++    if (p.bias_term == 1u)
++        sum = buffer_ld1(bias_blob, p_out);
++
++    for (uint q = 0u; q < p.channels; q++)
++    {
++        for (uint kd = 0u; kd < p.kernel_d; kd++)
++        {
++            for (uint kh = 0u; kh < p.kernel_h; kh++)
++            {
++                for (uint kw = 0u; kw < p.kernel_w; kw++)
++                {
++                    // 输入坐标（考虑 stride/dilation/pad）。
++                    int iz = int(z_out * p.stride_d + kd * p.dilation_d) - int(p.pad_front);
++                    int ih = int(i_out * p.stride_h + kh * p.dilation_h) - int(p.pad_top);
++                    int iw = int(j_out * p.stride_w + kw * p.dilation_w) - int(p.pad_left);
++
++                    // 边界判断：越界填 pad_value。
++                    afp v = p.pad_value;
++                    if (iz >= 0 && iz < int(p.d) && ih >= 0 && ih < int(p.h) && iw >= 0 && iw < int(p.w))
++                    {
++                        uint addr = q * p.cstep + uint(iz) * (p.h * p.w) + uint(ih) * p.w + uint(iw);
++                        v = buffer_ld1(bottom_blob, addr);
++                    }
++
++                    uint widx = p_out * (p.channels * p.maxk) + q * p.maxk
++                        + (kd * p.kernel_h * p.kernel_w + kh * p.kernel_w + kw);
++                    afp wt = buffer_ld1(weight_blob, widx);
++                    sum += v * wt;
++                }
++            }
++        }
++    }
++    buffer_st1(top_blob, out_addr, sum);
++}
++)VKGLSL";
++
++Convolution3D_vulkan::Convolution3D_vulkan()
++{
++    // 标量布局（elempack=1），保持与 seedvr2 自定义层一致，避免 2D pack4 行打包
++    // 的布局陷阱；正确性优先，性能优化（pack4/im2col）留待后续。
++    support_vulkan = true;
++    support_vulkan_packing = false;
++
++    pipeline_convolution3d = 0;
++}
++
++int Convolution3D_vulkan::load_param(const ParamDict& pd)
++{
++    int ret = Convolution3D::load_param(pd);
++
++    // 融合激活（activation_type != 0）暂未在 shader 中实现，退回 CPU 处理；
++    // SeedVR2 VAE 的 Convolution3D 均为无激活（activation_type=0），不受影响。
++    if (activation_type != 0)
++        support_vulkan = false;
++
++    return ret;
++}
++
++int Convolution3D_vulkan::create_pipeline(const Option& opt)
++{
++    // CPU 模式下 vkdev 尚未赋值，跳过管线创建。
++    if (!vkdev)
++        return 0;
++
++    std::vector<uint32_t> spirv;
++    const int compiled = ncnn::compile_spirv_module(convolution3d_shader_source, opt, spirv);
++    if (compiled != 0)
++    {
++        NCNN_LOGE("Convolution3D_vulkan compile failed %d", compiled);
++        return compiled;
++    }
++
++    pipeline_convolution3d = new Pipeline(vkdev);
++    pipeline_convolution3d->set_optimal_local_size_xyz(64, 1, 1);
++    pipeline_convolution3d->create(spirv.data(), spirv.size() * sizeof(uint32_t), std::vector<vk_specialization_type>());
++
++    return 0;
++}
++
++int Convolution3D_vulkan::destroy_pipeline(const Option& /*opt*/)
++{
++    delete pipeline_convolution3d;
++    pipeline_convolution3d = 0;
++    return 0;
++}
++
++int Convolution3D_vulkan::upload_model(VkTransfer& cmd, const Option& opt)
++{
++    cmd.record_upload(weight_data, weight_data_gpu, opt);
++    if (bias_term)
++        cmd.record_upload(bias_data, bias_data_gpu, opt);
++    return 0;
++}
++
++int Convolution3D_vulkan::forward(const VkMat& bottom_blob, VkMat& top_blob, VkCompute& cmd, const Option& opt) const
++{
++    const int w = bottom_blob.w;
++    const int h = bottom_blob.h;
++    const int d = bottom_blob.d;
++    const int channels = bottom_blob.c;
++    const int cstep = static_cast<int>(bottom_blob.cstep);
++
++    const int kernel_extent_w = dilation_w * (kernel_w - 1) + 1;
++    const int kernel_extent_h = dilation_h * (kernel_h - 1) + 1;
++    const int kernel_extent_d = dilation_d * (kernel_d - 1) + 1;
++
++    // 将 SAME padding（-233/-234）折算为显式 pad 量（与 CPU make_padding 一致）。
++    int pad_left_ = pad_left;
++    int pad_right_ = pad_right;
++    int pad_top_ = pad_top;
++    int pad_bottom_ = pad_bottom;
++    int pad_front_ = pad_front;
++    int pad_behind_ = pad_behind;
++    if (pad_left == -233 && pad_right == -233 && pad_top == -233 && pad_bottom == -233 && pad_front == -233 && pad_behind == -233)
++    {
++        // SAME_UPPER
++        const int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
++        const int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
++        const int dpad = kernel_extent_d + (d - 1) / stride_d * stride_d - d;
++        pad_left_ = wpad / 2; pad_right_ = wpad - wpad / 2;
++        pad_top_ = hpad / 2; pad_bottom_ = hpad - hpad / 2;
++        pad_front_ = dpad / 2; pad_behind_ = dpad - dpad / 2;
++    }
++    else if (pad_left == -234 && pad_right == -234 && pad_top == -234 && pad_bottom == -234 && pad_front == -234 && pad_behind == -234)
++    {
++        // SAME_LOWER
++        const int wpad = kernel_extent_w + (w - 1) / stride_w * stride_w - w;
++        const int hpad = kernel_extent_h + (h - 1) / stride_h * stride_h - h;
++        const int dpad = kernel_extent_d + (d - 1) / stride_d * stride_d - d;
++        pad_left_ = wpad - wpad / 2; pad_right_ = wpad / 2;
++        pad_top_ = hpad - hpad / 2; pad_bottom_ = hpad / 2;
++        pad_front_ = dpad - dpad / 2; pad_behind_ = dpad / 2;
++    }
++
++    const int outw = (w + pad_left_ + pad_right_ - kernel_extent_w) / stride_w + 1;
++    const int outh = (h + pad_top_ + pad_bottom_ - kernel_extent_h) / stride_h + 1;
++    const int outd = (d + pad_front_ + pad_behind_ - kernel_extent_d) / stride_d + 1;
++
++    top_blob.create(outw, outh, outd, num_output, 4u, 1, opt.blob_vkallocator);
++    if (top_blob.empty())
++        return -100;
++
++    const int maxk = kernel_w * kernel_h * kernel_d;
++    const uint32_t total = static_cast<uint32_t>(num_output) * outw * outh * outd;
++
++    std::vector<VkMat> bindings(4);
++    bindings[0] = bottom_blob;
++    bindings[1] = top_blob;
++    bindings[2] = weight_data_gpu;
++    bindings[3] = bias_data_gpu;
++
++    std::vector<vk_constant_type> constants(26);
++    constants[0].u32 = static_cast<uint32_t>(w);
++    constants[1].u32 = static_cast<uint32_t>(h);
++    constants[2].u32 = static_cast<uint32_t>(d);
++    constants[3].u32 = static_cast<uint32_t>(channels);
++    constants[4].u32 = static_cast<uint32_t>(cstep);
++    constants[5].u32 = static_cast<uint32_t>(outw);
++    constants[6].u32 = static_cast<uint32_t>(outh);
++    constants[7].u32 = static_cast<uint32_t>(outd);
++    constants[8].u32 = static_cast<uint32_t>(num_output);
++    constants[9].u32 = static_cast<uint32_t>(kernel_w);
++    constants[10].u32 = static_cast<uint32_t>(kernel_h);
++    constants[11].u32 = static_cast<uint32_t>(kernel_d);
++    constants[12].u32 = static_cast<uint32_t>(stride_w);
++    constants[13].u32 = static_cast<uint32_t>(stride_h);
++    constants[14].u32 = static_cast<uint32_t>(stride_d);
++    constants[15].u32 = static_cast<uint32_t>(dilation_w);
++    constants[16].u32 = static_cast<uint32_t>(dilation_h);
++    constants[17].u32 = static_cast<uint32_t>(dilation_d);
++    constants[18].u32 = static_cast<uint32_t>(pad_left_);
++    constants[19].u32 = static_cast<uint32_t>(pad_top_);
++    constants[20].u32 = static_cast<uint32_t>(pad_front_);
++    constants[21].u32 = static_cast<uint32_t>(maxk);
++    constants[22].u32 = static_cast<uint32_t>(bias_term);
++    constants[23].f = pad_value;
++    constants[24].u32 = static_cast<uint32_t>(top_blob.cstep);
++    constants[25].u32 = total;
++
++    VkMat dispatcher;
++    dispatcher.w = total;
++    dispatcher.h = 1;
++    dispatcher.c = 1;
++
++    cmd.record_pipeline(pipeline_convolution3d, bindings, constants, dispatcher);
++
++    return 0;
++}
++
++} // namespace ncnn
+diff --git a/src/layer/vulkan/convolution3d_vulkan.h b/src/layer/vulkan/convolution3d_vulkan.h
+new file mode 100644
+index 00000000..f0e2f02e
+--- /dev/null
++++ b/src/layer/vulkan/convolution3d_vulkan.h
+@@ -0,0 +1,38 @@
++// Copyright 2021 Tencent
++// SPDX-License-Identifier: BSD-3-Clause
++
++#ifndef LAYER_CONVOLUTION3D_VULKAN_H
++#define LAYER_CONVOLUTION3D_VULKAN_H
++
++#include "convolution3d.h"
++
++namespace ncnn {
++
++// Convolution3D 的 Vulkan 后端：pack1 直接卷积（不 im2col/winograd），
++// 支持显式 pad 与 SAME pad（-233/-234 在 forward 中折算为显式 pad 量）。
++// 每个 work item 计算一个输出元素，遍历 kernel 邻域与输入通道。
++class Convolution3D_vulkan : public Convolution3D
++{
++public:
++    Convolution3D_vulkan();
++
++    virtual int load_param(const ParamDict& pd);
++
++    virtual int create_pipeline(const Option& opt);
++    virtual int destroy_pipeline(const Option& opt);
++
++    virtual int upload_model(VkTransfer& cmd, const Option& opt);
++
++    using Convolution3D::forward;
++    virtual int forward(const VkMat& bottom_blob, VkMat& top_blob, VkCompute& cmd, const Option& opt) const;
++
++public:
++    VkMat weight_data_gpu;
++    VkMat bias_data_gpu;
++
++    Pipeline* pipeline_convolution3d;
++};
++
++} // namespace ncnn
++
++#endif // LAYER_CONVOLUTION3D_VULKAN_H
+-- 
+2.43.0
+

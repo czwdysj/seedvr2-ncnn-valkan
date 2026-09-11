@@ -1,207 +1,166 @@
-# SeedVR2 NCNN Vulkan
+# seedvr2-ncnn-vulkan
 
-本项目正在将 [SeedVR2](https://github.com/ByteDance-Seed/SeedVR) 3B 视频超分模型移植到
-[NCNN](https://github.com/Tencent/ncnn)，最终目标是在 C++ 中通过 NCNN Vulkan 后端完成推理。
+[SeedVR2](https://github.com/ByteDance-Seed/SeedVR) 3B 一步视频修复（超分/去噪/去压缩）
+模型的 **ncnn + Vulkan** 移植版。纯 C++ 推理，不依赖 PyTorch —— clone、下权重、
+一条命令，在自己的显卡上跑视频修复。
 
-当前已经跑通 **NCNN CPU 完整推理链路**，包括动态 VAE、32 层 DiT、CFG、Euler sampler
-和视频前后处理。Vulkan 运行时框架已经预留，但六个 SeedVR2 自定义层尚未实现
-`forward_vkcompute`，因此当前版本不能使用 Vulkan 推理。
-
-## 推理流程
-
-```text
-输入视频
-  -> 视频预处理
-  -> VAE Encoder
-  -> 条件 latent 与初始噪声
-  -> 32 层 DiT 流式推理
-  -> CFG + Euler sampler
-  -> VAE Decoder
-  -> 视频后处理
-  -> 输出视频
+```bash
+git clone --recursive https://github.com/<you>/seedvr2-ncnn-vulkan.git
+cd seedvr2-ncnn-vulkan
+./build.sh                 # 一键构建
+./download-models.sh       # 下载 7.5GB ncnn 权重（默认走国内 hf-mirror）
+./build/seedvr2-ncnn-vulkan -i input.mp4 -o output.mp4
 ```
 
-DiT 的 32 个 block 使用流式加载方式执行。运行时每次只加载一个 block，完成 forward 后
-立即释放权重，避免 3B 模型全部常驻内存。
+## 特性
 
-## 已实现内容
+- **单命令视频修复**：`-i in.mp4 -o out.mp4`，自动处理解码/编码/音频保留/帧数对齐
+- **纯 C++ / ncnn Vulkan 推理**，无 Python 运行时，开箱即用的默认文本条件
+- **6 个自定义 Vulkan 算子**（Conv3D / GroupNorm / SpatialAttention / SpaceTimeShuffle /
+  DiT Input/Block/Output）与官方 PyTorch 数值对齐（30 用例全 PASS，max err ≤ 2e-5）
+- **双模式加载**：流式（显存 ~3GB，慢）与常驻 `--resident`（显存 ~15GB，快约 66 倍）
+- 支持动态分辨率/帧数，不限定导出尺寸
 
-### 模型转换
+官方 PyTorch 参考实现建议 A100-80G（100 帧 720p）；本移植版把权重转成 fp16 并
+提供流式加载，消费级显卡也能跑。
 
-- SeedVR2 3B VAE Encoder/Decoder 已转换为 NCNN `param/bin`。
-- DiT 输入层、32 个 Transformer block 和输出层已转换为 NCNN `param/bin`。
-- 普通卷积、Convolution3D、InnerProduct 等计算复用 NCNN 原生算子。
-- 支持模型约束内的动态 `T/H/W`，不是固定导出尺寸。
+## 依赖
 
-### C++ Runtime
+| 平台 | 依赖 |
+|---|---|
+| Linux / WSL2 | `build-essential` `cmake ≥3.16` `git` `libvulkan-dev` `vulkan-tools` `ffmpeg` |
+| Windows | Visual Studio 2022、[Vulkan SDK](https://vulkan.lunarg.com/)、git、[ffmpeg](https://ffmpeg.org)（加入 PATH） |
 
-- 提供统一的 `SeedVR2Engine` 对外接口。
-- 实现视频预处理和后处理。
-- 实现 VAE posterior 采样与 latent scaling。
-- 实现 32 层 DiT 流式执行。
-- 实现 classifier-free guidance。
-- 实现 `v_lerp` 预测类型和 Euler sampler。
-- 支持预计算 positive/negative 文本 embedding。
-- 提供正式 CLI 和分层测试 runner。
-
-### CPU 自定义层
-
-当前共有六个 SeedVR2 自定义层：
-
-1. `DynamicFramewiseGroupNorm`
-2. `DynamicFramewiseSpatialAttention`
-3. `DynamicSpaceTimeShuffle`
-4. `SeedVR2DiTInput`
-5. `SeedVR2DiTBlock`
-6. `SeedVR2DiTOutput`
-
-这些层的 CPU `forward` 已实现。动态窗口 attention、MM-RoPE、Ada modulation、SwiGLU、
-时空 shuffle 等 SeedVR2 特有逻辑目前都在这些层中执行。
-
-### 测试与验证
-
-- VAE Encoder/Decoder 已使用多组动态尺寸输入验证。
-- DiT 输入层、单个 block、输出层和完整 32 层流程均有独立 runner。
-- 完整 DiT 新旧调度实现对同一输入的输出逐字节一致。
-- `SeedVR2Engine` 已使用真实模型完成 CPU 端到端 smoke test。
-- PyTorch reference、中间张量和 NCNN 对齐报告保存在 `test_vectors`、`ncnn_models`
-  及 `docs` 对应目录中。
-
-## 尚未实现
-
-### Vulkan 后端
-
-当前主要剩余工作是为六个自定义层实现 Vulkan 版本：
-
-- VkMat 输入输出和 pipeline 生命周期。
-- GroupNorm reduction 与 affine shader。
-- 动态空间 attention。
-- 动态窗口划分与 shifted window。
-- MM-RoPE。
-- QKV、softmax 和 attention 输出。
-- Ada modulation、SwiGLU 和残差路径。
-- 动态 patch/unpatch 与时空 shuffle。
-
-在全部 Vulkan 自定义层完成并通过 PyTorch/CPU 数值对齐前，Runtime 会明确拒绝 Vulkan
-后端，不会静默回退到 CPU 后宣称 Vulkan 可用。
-
-### 应用层功能
-
-- CLI 当前使用 FP32 raw tensor，不直接读取或写入 MP4。
-- C++ Runtime 不包含文本编码器，需要外部提供预计算 embedding。
-- 当前目标是 SeedVR2 3B、SR 任务、batch size 1。
-- 暂未实现音频保留、媒体封装和颜色修复。
-- Vulkan 显存卸载和性能优化尚未完成。
-
-## 目录结构
-
-```text
-include/seedvr2/engine.h  对外公开 API
-
-src/
-  core/                   引擎调度与运行时
-    engine.cpp            完整推理调度
-    runtime_context.h     运行时上下文
-    vulkan_context.cpp    Vulkan/NCNN 运行时配置
-  model/                  模型组件
-    vae.h/.cpp            VAE Encoder/Decoder
-    dit.h/.cpp            32 层 DiT 流式执行
-    sampler.h/.cpp        CFG 和 Euler sampler
-  layers/                 六个自定义算子层
-    dynamic_framewise_group_norm.h/.cpp        逐帧 GroupNorm
-    dynamic_framewise_spatial_attention.h/.cpp 空间注意力
-    dynamic_space_time_shuffle.h/.cpp          时空 Shuffle
-    seedvr2_dit_input.h/.cpp                   DiT 输入投影
-    seedvr2_dit_block.h/.cpp                   DiT Transformer block
-    seedvr2_dit_output.h/.cpp                  DiT 输出投影
-  pipeline/               视频前后处理
-    preprocessing.h/.cpp  视频预处理
-    postprocessing.h/.cpp 视频后处理
-
-apps/seedvr2_cli.cpp      命令行入口
-tests/                    分层和完整推理 runner
-tools/                    导出、转换和数值对齐脚本
-docs/                     转换及自定义层报告
-pytorch_model/            本地可选的 SeedVR2 PyTorch 参考代码（Git 忽略）
-```
+显卡：任意支持 Vulkan 的 GPU（NVIDIA / AMD / Intel）。运行前建议用
+`vulkaninfo --summary` 确认识别到独立显卡（而不是 llvmpipe 软渲染）。
 
 ## 构建
 
-依赖：
-
-- Ubuntu 24.04 / WSL2
-- CMake 3.16+
-- 支持 C++17 的编译器
-- NCNN 源码
+Linux / WSL2：
 
 ```bash
-cd /home/czw1/ncnn_learn/seedvr2_ncnn
-
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DNCNN_SOURCE_DIR=/home/czw1/ncnn_learn/ncnn \
-  -DSEEDVR2_ENABLE_VULKAN=OFF
-
-cmake --build build -j8
-ctest --test-dir build --output-on-failure
+./build.sh        # 初始化 ncnn submodule → 自动应用 ncnn patches → cmake → 编译
 ```
 
-当前 Vulkan 自定义层尚未完成，建议保持 `SEEDVR2_ENABLE_VULKAN=OFF`。
+Windows：
 
-## 模型目录
+```bat
+build.bat
+```
 
-Runtime 默认从下面的结构加载模型：
+构建会自动完成三件事：拉取 ncnn submodule（官方 Tencent/ncnn，固定在已验证提交）、
+应用 `patches/` 里的两个补丁（Convolution3D Vulkan 后端 + 多核 CPU 位图解析修复）、
+编译出 `build/seedvr2-ncnn-vulkan`。
+
+## 下载模型
+
+```bash
+./download-models.sh
+```
+
+- 默认从 `hf-mirror.com`（国内加速）下载；海外可
+  `SEEDVR2_HF_ENDPOINT=https://huggingface.co ./download-models.sh`
+- 自定义仓库：`SEEDVR2_HF_REPO=<user>/<repo> ./download-models.sh`
+- 已下载过的文件自动跳过，可中断重跑
+
+`models/` 组装完成后：
 
 ```text
-ncnn_models/
-  vae_dynamic/
-    seedvr2_vae_encoder_dynamic.ncnn.param
-    seedvr2_vae_encoder_dynamic.ncnn.bin
-    seedvr2_vae_decoder_dynamic.ncnn.param
-    seedvr2_vae_decoder_dynamic.ncnn.bin
-
-  dit_full_fp16/
-    seedvr2_dit_input.ncnn.param
-    seedvr2_dit_input.ncnn.bin
-    seedvr2_dit_block_00.ncnn.param
-    seedvr2_dit_block_00.ncnn.bin
-    ...
-    seedvr2_dit_block_31.ncnn.param
-    seedvr2_dit_block_31.ncnn.bin
-    seedvr2_dit_output.ncnn.param
-    seedvr2_dit_output.ncnn.bin
+models/
+├── dit_full_fp16/          # 3B DiT，fp16，34 对 param/bin（约 6.5GB）
+├── vae_dynamic/            # VAE encoder + decoder（约 1GB）
+├── default_pos_emb.bin     # 官方默认正文本条件（内置，随仓库分发）
+└── default_neg_emb.bin     # 官方默认负文本条件（内置，随仓库分发）
 ```
 
-模型权重体积较大，不提交到 Git 仓库。
+## 使用
 
-## C++ 接口
+```bash
+./build/seedvr2-ncnn-vulkan -i input.mp4 -o output.mp4 [选项]
+```
+
+| 选项 | 说明 | 默认 |
+|---|---|---|
+| `-i PATH` | 输入视频（ffmpeg 支持的任意格式） | 必填 |
+| `-o PATH` | 输出视频（mp4，保留原音频） | 必填 |
+| `--models DIR` | 模型目录 | `./models` |
+| `--steps N` | 采样步数 | `1`（官方 one-step） |
+| `--cfg X` | CFG 强度（>1 启用负向文本） | `1.0` |
+| `--seed S` | 随机种子 | `666` |
+| `--threads N` | CPU 线程数 | `8` |
+| `--resident` | 32 个 DiT block 权重常驻显存 | 关闭 |
+
+**显存与速度参考**（RTX PRO 6000，64×64×5 帧，1 step）：
+
+| 模式 | 显存峰值 | DiT 单步耗时 |
+|---|---|---|
+| 流式（默认） | ~2.3GB | ~22s |
+| `--resident` | ~14.5GB | ~0.33s（66×） |
+
+流式模式每次采样步都要重新加载 6.4GB 权重，适合显存紧张的场景；显存 ≥16GB 建议
+始终开启 `--resident`。步数 >1 时差距按步数成倍放大。
+
+## 在你自己的 C++ 项目里使用
+
+核心库 `seedvr2_ncnn` 是纯静态库，对外只暴露一个头文件：
 
 ```cpp
-#include <seedvr2/engine.h>
+#include "seedvr2/engine.h"
 
-seedvr2::RuntimeOptions options;
-options.device = seedvr2::DeviceType::Cpu;
-options.num_threads = 8;
-options.sampling_steps = 1;
-options.cfg_scale = 1.0f;
+seedvr2::RuntimeOptions opts;
+opts.device = seedvr2::DeviceType::Vulkan;
+opts.sampling_steps = 1;
+opts.dit_resident = true;                 // 显存充足时建议开启
 
 seedvr2::SeedVR2Engine engine;
-if (engine.load("/path/to/ncnn_models", options) != 0)
-    throw std::runtime_error(engine.last_error());
+engine.load("models/", opts);
 
+seedvr2::Video input = /* THWC、RGB、fp32、[0,1] */;
 seedvr2::Video output;
-if (engine.process(input, positive, negative, output) != 0)
-    throw std::runtime_error(engine.last_error());
+engine.process(input, {}, {}, output);    // 文本传空 → 自动用默认 embedding
 ```
 
-公开接口使用 FP32、`T,H,W,C` 布局的 RGB 视频，数值范围为 `[0,1]`。文本 embedding
-布局为 `[tokens,5120]`。
+完整字段见 [`include/seedvr2/engine.h`](include/seedvr2/engine.h)。错误信息通过
+`engine.last_error()` 获取；设置环境变量 `SEEDVR2_PROFILE=1` 可输出分阶段耗时。
 
-## 后续计划
+## 源码结构
 
-1. 实现三个 VAE 动态层的 Vulkan forward。
-2. 实现 DiT Input/Output 的 Vulkan forward。
-3. 将 DiT block 的 projection、Ada 和 MLP 迁移到 Vulkan。
-4. 实现动态窗口 attention、shifted window 和 MM-RoPE。
-5. 使用现有 PyTorch 中间张量逐层验证 Vulkan 数值。
-6. 接入 MP4 输入输出并进行 Vulkan benchmark。
+```text
+src/
+├── core/       # engine 调度 + 运行时上下文 + Vulkan 配置
+├── model/      # VAE / DiT / sampler
+├── layers/     # 6 个自定义算子层（含 Vulkan compute shader）
+├── pipeline/   # 视频前后处理
+└── cli/        # 命令行入口
+include/        # 对外公开头文件（seedvr2/engine.h）
+tests/          # 分层数值对齐 runner（30 用例）+ 端到端 profiler
+tools/          # PyTorch → ncnn 权重导出脚本、默认 embedding 转换
+patches/        # 对官方 ncnn 的两个补丁（构建时自动应用）
+docs/           # 算子实现与转换过程报告
+```
+
+## 从 PyTorch 权重重新导出（可选）
+
+正常使用只需 `download-models.sh`。若想从官方 fp32 检查点自己生成 ncnn 权重：
+
+```bash
+python tools/export_seedvr2_vae_dynamic_ncnn.py ...   # VAE
+python tools/export_seedvr2_dit_ncnn.py --storage fp16 ...  # DiT
+python tools/export_default_embeddings.py             # 默认文本 embedding
+```
+
+## 性能说明
+
+DiT 的 32 个 block 逐个串行执行。流式模式下每个采样步都会重新从磁盘加载
+6.4GB 权重（为低显存设备设计）；`--resident` 一次性加载后常驻显存。激活值
+逐层计算逐层释放，显存占用主要由「权重策略 + 分辨率×帧数」决定。
+
+## 致谢
+
+- [ByteDance-Seed/SeedVR2](https://github.com/ByteDance-Seed/SeedVR) —— 原模型与官方权重（Apache-2.0）
+- [Tencent/ncnn](https://github.com/Tencent/ncnn) —— 推理框架
+- [nihui 的 ncnn-vulkan 系列项目](https://github.com/nihui)（realesrgan-ncnn-vulkan 等）—— 项目形态参考
+
+## License
+
+Apache-2.0（与上游一致）
