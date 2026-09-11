@@ -5,7 +5,7 @@
 一条命令，在自己的显卡上跑视频修复。
 
 ```bash
-git clone --recursive https://github.com/czwdysj/seedvr2-ncnn-vulkan.git
+git clone --recursive https://github.com/czwdysj/seedvr2-ncnn-valkan.git
 cd seedvr2-ncnn-vulkan
 ./build.sh                 # 一键构建
 ./download-models.sh       # 下载 7.5GB ncnn 权重（默认走国内 hf-mirror）
