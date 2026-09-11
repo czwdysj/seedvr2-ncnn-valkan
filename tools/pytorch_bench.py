@@ -35,6 +35,12 @@ def main() -> int:
     import torch
     from omegaconf import OmegaConf
 
+    # 官方框架的 barrier 装饰器需要默认 process group（单卡用 gloo 单进程组）。
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29517")
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="gloo", world_size=1, rank=0)
+
     project_dir = args.project_dir.resolve()
     os.chdir(project_dir)
     sys.path.insert(0, str(project_dir))

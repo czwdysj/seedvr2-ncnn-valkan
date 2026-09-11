@@ -26,9 +26,14 @@
 
 #ifdef _WIN32
 #define POPEN _popen
+#define POPEN_READ_MODE "rb"
+#define POPEN_WRITE_MODE "wb"
 #define PCLOSE _pclose
 #else
+// POSIX popen 的 mode 只接受 "r"/"w"（"rb" 会 EINVAL），二进制语义即默认行为。
 #define POPEN popen
+#define POPEN_READ_MODE "r"
+#define POPEN_WRITE_MODE "w"
 #define PCLOSE pclose
 #endif
 
@@ -109,7 +114,7 @@ bool decode_frames(const std::string& path,
 {
     const std::string command =
         "ffmpeg -v error -i \"" + path + "\" -f rawvideo -pix_fmt rgb24 -";
-    FILE* stream = POPEN(command.c_str(), "rb");
+    FILE* stream = POPEN(command.c_str(), POPEN_READ_MODE);
     if (stream == nullptr)
         return false;
     const std::size_t frame_bytes = static_cast<std::size_t>(width) * height * 3;
@@ -122,17 +127,20 @@ bool decode_frames(const std::string& path,
             break;
         if (got != frame_bytes)
         {
+            std::fprintf(stderr, "[decode] partial frame: got %zu of %zu bytes\n",
+                         got, frame_bytes);
             PCLOSE(stream);
             return false;   // 尾部残帧（尺寸不完整）直接丢弃
         }
         frames.insert(frames.end(), buffer.begin(), buffer.end());
     }
     const int status = PCLOSE(stream);
-#ifdef _WIN32
-    return !frames.empty();
-#else
-    return !frames.empty() && status != -1 && WEXITSTATUS(status) == 0;
+    std::fprintf(stderr, "[decode] frames=%zu pclose=%d\n", frames.size(), status);
+#ifndef _WIN32
+    if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return false;
 #endif
+    return !frames.empty();
 }
 
 bool encode_video(const std::string& output,
@@ -149,7 +157,7 @@ bool encode_video(const std::string& output,
         + " -r " + std::to_string(fps)
         + " -i - -i \"" + input + "\" -map 0:v -map 1:a? "
         + "-c:v libx264 -crf 18 -pix_fmt yuv420p -c:a copy \"" + output + "\"";
-    FILE* stream = POPEN(command.c_str(), "wb");
+    FILE* stream = POPEN(command.c_str(), POPEN_WRITE_MODE);
     if (stream == nullptr)
         return false;
     const std::size_t total = static_cast<std::size_t>(frames) * width * height * 3;

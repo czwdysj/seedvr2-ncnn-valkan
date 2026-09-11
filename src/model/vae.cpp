@@ -106,7 +106,16 @@ int SeedVR2VAE::encode(const ncnn::Mat& video,
     if (extractor.extract(encoder_->output_names()[0], moments) != 0 || moments.dims != 4
         || moments.c != 32 || moments.elemsize != 4u || moments.elempack != 1)
     {
-        last_error_ = "VAE encoder did not return [32,T,H,W] FP32 moments";
+        char detail[128];
+        if (moments.empty())
+            std::snprintf(detail, sizeof(detail), "got empty output");
+        else
+            std::snprintf(detail, sizeof(detail),
+                          "got [c=%d d=%d h=%d w=%d] dims=%d elemsize=%zu elempack=%d",
+                          moments.c, moments.d, moments.h, moments.w, moments.dims,
+                          moments.elemsize, moments.elempack);
+        last_error_ = std::string("VAE encoder did not return [32,T,H,W] FP32 moments: ")
+            + detail;
         return static_cast<int>(Status::InferenceFailed);
     }
 
