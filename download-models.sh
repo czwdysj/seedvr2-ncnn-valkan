@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-HF_REPO="${SEEDVR2_HF_REPO:-czwdysj/seedvr2-ncnn-models}"
+HF_REPO="${SEEDVR2_HF_REPO:-vvzc/seedvr2-ncnn-models}"
 ENDPOINT="${SEEDVR2_HF_ENDPOINT:-https://hf-mirror.com}"
 BASE="${ENDPOINT}/${HF_REPO}/resolve/main"
 

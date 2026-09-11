@@ -5,12 +5,14 @@
 一条命令，在自己的显卡上跑视频修复。
 
 ```bash
-git clone --recursive https://github.com/<you>/seedvr2-ncnn-vulkan.git
+git clone --recursive https://github.com/czwdysj/seedvr2-ncnn-vulkan.git
 cd seedvr2-ncnn-vulkan
 ./build.sh                 # 一键构建
 ./download-models.sh       # 下载 7.5GB ncnn 权重（默认走国内 hf-mirror）
 ./build/seedvr2-ncnn-vulkan -i input.mp4 -o output.mp4
 ```
+
+权重仓库：[vvzc/seedvr2-ncnn-models](https://huggingface.co/vvzc/seedvr2-ncnn-models)
 
 ## 特性
 
