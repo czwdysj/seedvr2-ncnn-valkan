@@ -98,4 +98,45 @@ void RuntimeContext::configure(ncnn::Net& net) const
         net.set_vulkan_device(options_.vulkan_device_index);
 #endif
 }
+
+#if NCNN_VULKAN
+VulkanExecutionContext::VulkanExecutionContext(const RuntimeContext& runtime)
+    : runtime_(runtime),
+      device_(runtime.options().device == DeviceType::Vulkan
+                  ? ncnn::get_gpu_device(runtime.options().vulkan_device_index)
+                  : nullptr),
+      blob_allocator_(device_ ? device_->acquire_blob_allocator() : nullptr),
+      staging_allocator_(device_ ? device_->acquire_staging_allocator() : nullptr)
+{
+}
+
+VulkanExecutionContext::~VulkanExecutionContext()
+{
+    if (device_ && staging_allocator_)
+        device_->reclaim_staging_allocator(staging_allocator_);
+    if (device_ && blob_allocator_)
+        device_->reclaim_blob_allocator(blob_allocator_);
+}
+
+bool VulkanExecutionContext::valid() const noexcept
+{
+    return device_ && blob_allocator_ && staging_allocator_;
+}
+
+ncnn::Option VulkanExecutionContext::option() const
+{
+    ncnn::Option result = runtime_.ncnn_option();
+    result.blob_vkallocator = blob_allocator_;
+    result.workspace_vkallocator = blob_allocator_;
+    result.staging_vkallocator = staging_allocator_;
+    return result;
+}
+
+void VulkanExecutionContext::configure(ncnn::Extractor& extractor) const
+{
+    extractor.set_blob_vkallocator(blob_allocator_);
+    extractor.set_workspace_vkallocator(blob_allocator_);
+    extractor.set_staging_vkallocator(staging_allocator_);
+}
+#endif
 } // namespace seedvr2

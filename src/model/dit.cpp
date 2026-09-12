@@ -111,56 +111,6 @@ LayerType* find_custom_layer(ncnn::Net& net)
     return nullptr;
 }
 
-#if NCNN_VULKAN
-class VulkanExecutionScope
-{
-public:
-    explicit VulkanExecutionScope(int device_index)
-        : device_(ncnn::get_gpu_device(device_index)),
-          blob_allocator_(device_ ? device_->acquire_blob_allocator() : nullptr),
-          staging_allocator_(device_ ? device_->acquire_staging_allocator() : nullptr)
-    {
-    }
-
-    ~VulkanExecutionScope()
-    {
-        if (device_ && staging_allocator_)
-            device_->reclaim_staging_allocator(staging_allocator_);
-        if (device_ && blob_allocator_)
-            device_->reclaim_blob_allocator(blob_allocator_);
-    }
-
-    bool valid() const noexcept
-    {
-        return device_ && blob_allocator_ && staging_allocator_;
-    }
-
-    const ncnn::VulkanDevice* device() const noexcept { return device_; }
-    ncnn::VkAllocator* blob_allocator() const noexcept { return blob_allocator_; }
-    ncnn::VkAllocator* staging_allocator() const noexcept { return staging_allocator_; }
-
-    ncnn::Option option(const ncnn::Option& base) const
-    {
-        ncnn::Option result = base;
-        result.blob_vkallocator = blob_allocator_;
-        result.workspace_vkallocator = blob_allocator_;
-        result.staging_vkallocator = staging_allocator_;
-        return result;
-    }
-
-    void configure(ncnn::Extractor& extractor) const
-    {
-        extractor.set_blob_vkallocator(blob_allocator_);
-        extractor.set_workspace_vkallocator(blob_allocator_);
-        extractor.set_staging_vkallocator(staging_allocator_);
-    }
-
-private:
-    const ncnn::VulkanDevice* device_;
-    ncnn::VkAllocator* blob_allocator_;
-    ncnn::VkAllocator* staging_allocator_;
-};
-#endif
 } // namespace
 
 SeedVR2DiT::SeedVR2DiT() = default;
@@ -438,17 +388,6 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
                                float timestep,
                                ncnn::Mat& output)
 {
-    last_vulkan_transfer_stats_ = {};
-    if (!input_ || !output_ || !context_)
-    {
-        last_error_ = "DiT is not loaded";
-        return static_cast<int>(Status::NotLoaded);
-    }
-    if (context_->options().device != DeviceType::Vulkan)
-    {
-        last_error_ = "DiT Vulkan forward requires a Vulkan RuntimeContext";
-        return static_cast<int>(Status::UnsupportedBackend);
-    }
     if (latent.dims != 4 || latent.c != 33 || latent.elemsize != 4u || latent.elempack != 1
         || text.dims != 2 || text.w != 5120 || text.elemsize != 4u || text.elempack != 1
         || latent.h % 2 != 0 || latent.w % 2 != 0)
@@ -458,36 +397,121 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
     }
 
     ncnn::Mat flat = flatten_latent(latent);
-    ncnn::Mat shape(3, static_cast<size_t>(4u), 1);
-    ncnn::Mat timestep_mat(1, static_cast<size_t>(4u), 1);
-    if (flat.empty() || shape.empty() || timestep_mat.empty())
+    if (flat.empty())
         return static_cast<int>(Status::OutOfMemory);
-    int* shape_data = shape;
-    shape_data[0] = latent.d;
-    shape_data[1] = latent.h;
-    shape_data[2] = latent.w;
-    static_cast<float*>(timestep_mat.data)[0] = timestep;
 
-    VulkanExecutionScope execution(context_->options().vulkan_device_index);
+    VulkanExecutionContext execution(*context_);
     if (!execution.valid())
     {
         last_error_ = "failed to acquire Vulkan allocators for DiT";
         return static_cast<int>(Status::OutOfMemory);
     }
-    ncnn::Option option = execution.option(context_->ncnn_option());
-    ncnn::VkCompute command(execution.device());
-
-    // 四个入口张量集中记录到同一命令流。后续所有子网复用这些 allocator，避免
-    // extractor 析构时回收中间 VkMat 所属的临时 allocator。
+    const ncnn::Option option = execution.option();
+    ncnn::VkCompute upload(execution.device());
     ncnn::VkMat flat_gpu;
     ncnn::VkMat text_gpu;
+    upload.record_upload(flat, flat_gpu, option);
+    upload.record_upload(text, text_gpu, option);
+    if (upload.submit_and_wait() != 0)
+    {
+        last_error_ = "DiT Vulkan input upload failed";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+
+    ncnn::VkMat flat_output_gpu;
+    const int result = forward_vkmat(flat_gpu,
+                                     text_gpu,
+                                     latent.d,
+                                     latent.h,
+                                     latent.w,
+                                     timestep,
+                                     execution,
+                                     flat_output_gpu);
+    if (result != 0)
+        return result;
+    last_vulkan_transfer_stats_.entry_upload_commands = 1;
+    ++last_vulkan_transfer_stats_.queue_submissions;
+
+    ncnn::Mat flat_output;
+    ncnn::VkCompute download(execution.device());
+    download.record_download(flat_output_gpu, flat_output, option);
+    if (download.submit_and_wait() != 0)
+    {
+        last_error_ = "DiT Vulkan final download failed";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+    last_vulkan_transfer_stats_.final_download_commands = 1;
+    ++last_vulkan_transfer_stats_.queue_submissions;
+
+    output = unflatten_latent(flat_output, latent.d, latent.h, latent.w);
+    if (output.empty())
+        return static_cast<int>(Status::OutOfMemory);
+    last_error_.clear();
+    return static_cast<int>(Status::Ok);
+}
+
+int SeedVR2DiT::forward_vkmat(const ncnn::VkMat& latent,
+                              const ncnn::VkMat& text,
+                              int frames,
+                              int height,
+                              int width,
+                              float timestep,
+                              VulkanExecutionContext& execution,
+                              ncnn::VkMat& output)
+{
+    last_vulkan_transfer_stats_ = {};
+    if (!input_ || !output_ || !context_)
+    {
+        last_error_ = "DiT is not loaded";
+        return static_cast<int>(Status::NotLoaded);
+    }
+    if (!execution.valid() || context_->options().device != DeviceType::Vulkan)
+    {
+        last_error_ = "DiT VkMat forward requires a valid Vulkan execution context";
+        return static_cast<int>(Status::UnsupportedBackend);
+    }
+    if (latent.dims != 2 || latent.w != 33
+        || latent.h * latent.elempack != frames * height * width
+        || text.dims != 2 || text.w != 5120 || frames <= 0 || height <= 0 || width <= 0
+        || height % 2 != 0 || width % 2 != 0)
+    {
+        char detail[192];
+        std::snprintf(detail,
+                      sizeof(detail),
+                      "DiT VkMat expects latent [T*H*W,33], text [tokens,5120] and even H/W; "
+                      "got latent dims=%d w=%d h=%d pack=%d, text dims=%d w=%d h=%d, shape=%d,%d,%d",
+                      latent.dims,
+                      latent.w,
+                      latent.h,
+                      latent.elempack,
+                      text.dims,
+                      text.w,
+                      text.h,
+                      frames,
+                      height,
+                      width);
+        last_error_ = detail;
+        return static_cast<int>(Status::InvalidArgument);
+    }
+
+    // shape/timestep 是极小的控制输入，保留现有 param 图输入以兼容模型文件；
+    // 自定义层从 CPU runtime metadata 读取值，不会把这些 VkMat 下载回主机。
+    ncnn::Mat shape(3, static_cast<size_t>(4u), 1);
+    ncnn::Mat timestep_mat(1, static_cast<size_t>(4u), 1);
+    if (shape.empty() || timestep_mat.empty())
+        return static_cast<int>(Status::OutOfMemory);
+    int* shape_data = shape;
+    shape_data[0] = frames;
+    shape_data[1] = height;
+    shape_data[2] = width;
+    static_cast<float*>(timestep_mat.data)[0] = timestep;
+
+    const ncnn::Option option = execution.option();
+    ncnn::VkCompute command(execution.device());
     ncnn::VkMat timestep_gpu;
     ncnn::VkMat shape_gpu;
-    command.record_upload(flat, flat_gpu, option);
-    command.record_upload(text, text_gpu, option);
     command.record_upload(timestep_mat, timestep_gpu, option);
     command.record_upload(shape, shape_gpu, option);
-    last_vulkan_transfer_stats_.entry_upload_commands = 1;
 
     SeedVR2DiTInput* input_layer = find_custom_layer<SeedVR2DiTInput>(*input_);
     if (!input_layer)
@@ -495,7 +519,7 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
         last_error_ = "DiT input custom layer is missing";
         return static_cast<int>(Status::ModelLoadFailed);
     }
-    input_layer->set_runtime_metadata(latent.d, latent.h, latent.w, timestep);
+    input_layer->set_runtime_metadata(frames, height, width, timestep);
 
     ncnn::Extractor input_extractor = input_->create_extractor();
     execution.configure(input_extractor);
@@ -503,8 +527,8 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
     ncnn::VkMat text_tokens;
     ncnn::VkMat embedding;
     ncnn::VkMat patched_shape;
-    if (input_extractor.input("vid", flat_gpu) != 0
-        || input_extractor.input("txt", text_gpu) != 0
+    if (input_extractor.input("vid", latent) != 0
+        || input_extractor.input("txt", text) != 0
         || input_extractor.input("timestep", timestep_gpu) != 0
         || input_extractor.input("vid_shape", shape_gpu) != 0
         || input_extractor.extract("vid_out", video_tokens, command) != 0
@@ -516,8 +540,8 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
         return static_cast<int>(Status::InferenceFailed);
     }
 
-    const int patched_height = latent.h / 2;
-    const int patched_width = latent.w / 2;
+    const int patched_height = height / 2;
+    const int patched_width = width / 2;
     if (resident_ && blocks_.size() == 32)
     {
         for (int index = 0; index < 32; ++index)
@@ -529,7 +553,7 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
                 last_error_ = "DiT block custom layer is missing at index " + std::to_string(index);
                 return static_cast<int>(Status::ModelLoadFailed);
             }
-            layer->set_runtime_shape(latent.d, patched_height, patched_width);
+            layer->set_runtime_shape(frames, patched_height, patched_width);
 
             ncnn::Extractor extractor = net.create_extractor();
             execution.configure(extractor);
@@ -571,7 +595,7 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
                                                 text_tokens,
                                                 embedding,
                                                 patched_shape,
-                                                latent.d,
+                                                frames,
                                                 patched_height,
                                                 patched_width,
                                                 execution.blob_allocator(),
@@ -592,39 +616,34 @@ int SeedVR2DiT::forward_vulkan(const ncnn::Mat& latent,
         last_error_ = "DiT output custom layer is missing";
         return static_cast<int>(Status::ModelLoadFailed);
     }
-    output_layer->set_runtime_shape(latent.d, patched_height, patched_width);
+    output_layer->set_runtime_shape(frames, patched_height, patched_width);
 
     ncnn::Extractor output_extractor = output_->create_extractor();
     execution.configure(output_extractor);
-    ncnn::VkMat flat_output_gpu;
     if (output_extractor.input("vid", video_tokens) != 0
         || output_extractor.input("emb", embedding) != 0
         || output_extractor.input("vid_shape", patched_shape) != 0
-        || output_extractor.extract("vid_out", flat_output_gpu, command) != 0)
+        || output_extractor.extract("vid_out", output, command) != 0)
     {
         last_error_ = "DiT Vulkan output projection failed";
         return static_cast<int>(Status::InferenceFailed);
     }
 
-    ncnn::Mat flat_output;
-    command.record_download(flat_output_gpu, flat_output, option);
-    last_vulkan_transfer_stats_.final_download_commands = 1;
-    if (command.submit_and_wait() != 0)
+    // 输出提交后仍保留在共享 allocator 的 VkMat 中；这里同步是为了让 output
+    // extractor 的临时 workspace 可以安全释放，不包含任何 device-to-host copy。
+    if (command.submit_and_wait() != 0 || command.reset() != 0)
     {
         last_error_ = "DiT Vulkan final submission failed";
         return static_cast<int>(Status::InferenceFailed);
     }
     ++last_vulkan_transfer_stats_.queue_submissions;
 
-    if (flat_output.dims != 2 || flat_output.w != 16
-        || flat_output.h != latent.d * latent.h * latent.w)
+    if (output.dims != 2 || output.w != 16
+        || output.h * output.elempack != frames * height * width)
     {
         last_error_ = "DiT Vulkan output projection returned an invalid shape";
         return static_cast<int>(Status::InferenceFailed);
     }
-    output = unflatten_latent(flat_output, latent.d, latent.h, latent.w);
-    if (output.empty())
-        return static_cast<int>(Status::OutOfMemory);
     last_error_.clear();
     return static_cast<int>(Status::Ok);
 }

@@ -5,6 +5,11 @@
 
 #include <net.h>
 
+#if NCNN_VULKAN
+#include <command.h>
+#include <gpu.h>
+#endif
+
 #include <string>
 
 #include "seedvr2/engine.h"
@@ -42,4 +47,32 @@ private:
     ncnn::Option ncnn_option_;
     VulkanContext vulkan_;
 };
+
+#if NCNN_VULKAN
+// 一次 Engine::process 期间共享的 Vulkan 张量执行上下文。
+// 它持有同一设备上的 blob/staging allocator，使 VAE、DiT 和 sampler 返回的
+// VkMat 可以跨组件存活；上下文销毁前，调用方必须确保已提交的 GPU 命令完成。
+class VulkanExecutionContext
+{
+public:
+    explicit VulkanExecutionContext(const RuntimeContext& runtime);
+    ~VulkanExecutionContext();
+
+    VulkanExecutionContext(const VulkanExecutionContext&) = delete;
+    VulkanExecutionContext& operator=(const VulkanExecutionContext&) = delete;
+
+    bool valid() const noexcept;
+    const ncnn::VulkanDevice* device() const noexcept { return device_; }
+    ncnn::VkAllocator* blob_allocator() const noexcept { return blob_allocator_; }
+    ncnn::VkAllocator* staging_allocator() const noexcept { return staging_allocator_; }
+    ncnn::Option option() const;
+    void configure(ncnn::Extractor& extractor) const;
+
+private:
+    const RuntimeContext& runtime_;
+    const ncnn::VulkanDevice* device_ = nullptr;
+    ncnn::VkAllocator* blob_allocator_ = nullptr;
+    ncnn::VkAllocator* staging_allocator_ = nullptr;
+};
+#endif
 } // namespace seedvr2

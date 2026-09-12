@@ -41,6 +41,18 @@ public:
                        const ncnn::Mat& text,
                        float timestep,
                        ncnn::Mat& output);
+
+    // Engine 内部零大张量传输接口。latent/output 使用 token-major 的二维布局
+    // [T*H*W,C]（ncnn: w=C,h=T*H*W），text 为 [tokens,5120]。
+    // shape/timestep 仍由 CPU 元数据控制，但不会下载任何 feature tensor。
+    int forward_vkmat(const ncnn::VkMat& latent,
+                      const ncnn::VkMat& text,
+                      int frames,
+                      int height,
+                      int width,
+                      float timestep,
+                      VulkanExecutionContext& execution,
+                      ncnn::VkMat& output);
 #endif
 
     const std::string& last_error() const noexcept { return last_error_; }
