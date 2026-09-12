@@ -1,10 +1,11 @@
 # 本文件是 SeedVR2 NCNN Runtime 的顶层构建入口。
 # 它生成可复用静态库、正式 CLI 和分层数值测试；NCNN 可由源码子目录构建，
-# Vulkan 作为显式选项保留，但六个自定义层补齐 forward_vkcompute 前运行时会拒绝该后端。
+# Vulkan 作为显式选项保留；安装阶段同时导出可供外部项目 find_package 的 CMake 包。
 cmake_minimum_required(VERSION 3.16)
 project(seedvr2_ncnn LANGUAGES CXX)
 
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,7 +45,9 @@ add_library(
     src/layers/seedvr2_dit_output.cpp)
 target_include_directories(
     seedvr2_ncnn
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(seedvr2_ncnn PUBLIC ncnn)
 # 六个自定义层均已实现 forward_vkcompute，能力闸门随 Vulkan 构建开关打开；
@@ -157,9 +160,26 @@ if(SEEDVR2_BUILD_TESTS)
 endif()
 
 install(TARGETS seedvr2_ncnn
+        EXPORT seedvr2_ncnnTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/seedvr2
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT seedvr2_ncnnTargets
+        FILE seedvr2_ncnnTargets.cmake
+        NAMESPACE SeedVR2::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/seedvr2_ncnn)
+configure_package_config_file(
+    cmake/seedvr2_ncnnConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/seedvr2_ncnnConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/seedvr2_ncnn)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/seedvr2_ncnnConfigVersion.cmake
+    VERSION 0.1.1
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/seedvr2_ncnnConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/seedvr2_ncnnConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/seedvr2_ncnn)
 if(SEEDVR2_BUILD_APPS)
     install(TARGETS seedvr2-ncnn-vulkan
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

@@ -1,0 +1,10 @@
+# 本文件生成 seedvr2_ncnn 的安装包配置。
+# 外部 CMake 项目调用 find_package(seedvr2_ncnn CONFIG) 后，可以直接链接
+# SeedVR2::seedvr2_ncnn；ncnn 依赖由同一安装前缀中的配置文件自动解析。
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(ncnn CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/seedvr2_ncnnTargets.cmake")
+check_required_components(seedvr2_ncnn)
