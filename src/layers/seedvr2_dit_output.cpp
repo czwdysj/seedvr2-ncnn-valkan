@@ -18,7 +18,7 @@ namespace
 {
 ncnn::Layer* load_inner_product(const ncnn::ModelBin& mb, int input_size,
                                 int output_size, bool bias,
-                                const ncnn::VulkanDevice* vkdev)
+                                const ncnn::Layer* owner)
 {
     ncnn::Layer* layer = ncnn::create_layer("InnerProduct");
     if (!layer)
@@ -26,8 +26,10 @@ ncnn::Layer* load_inner_product(const ncnn::ModelBin& mb, int input_size,
 #if NCNN_VULKAN
     // 关键：必须在 load_param 之前设置 vkdev。Layer_final::load_param 里若 vkdev
     // 为空会把 layer_vulkan 删除（fallback 到 CPU），之后就无法走 Vulkan 了。
-    if (vkdev)
-        layer->vkdev = vkdev;
+    if (owner && owner->vkdev)
+        layer->vkdev = owner->vkdev;
+#else
+    (void)owner;
 #endif
     ncnn::ParamDict pd;
     pd.set(0, output_size);
@@ -264,7 +266,7 @@ int SeedVR2DiTOutput::load_model(const ncnn::ModelBin& mb)
     norm_weight = mb.load(dim, 1);
     output_shift = mb.load(dim, 1);
     output_scale = mb.load(dim, 1);
-    projection = load_inner_product(mb, dim, output_channels * 4, true, vkdev);
+    projection = load_inner_product(mb, dim, output_channels * 4, true, this);
     return norm_weight.empty() || output_shift.empty() || output_scale.empty() || !projection
         ? -100
         : 0;

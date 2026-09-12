@@ -30,7 +30,7 @@ namespace
         int input_size,
         int output_size,
         bool bias,
-        const ncnn::VulkanDevice *vkdev)
+        const ncnn::Layer *owner)
     {
         ncnn::Layer *layer = ncnn::create_layer("InnerProduct");
         if (!layer)
@@ -38,8 +38,10 @@ namespace
 #if NCNN_VULKAN
         // 关键：必须在 load_param 之前设置 vkdev。Layer_final::load_param 里若
         // vkdev 为空会把 layer_vulkan 删除（fallback 到 CPU），之后无法走 Vulkan。
-        if (vkdev)
-            layer->vkdev = vkdev;
+        if (owner && owner->vkdev)
+            layer->vkdev = owner->vkdev;
+#else
+        (void)owner;
 #endif
         ncnn::ParamDict pd;
         pd.set(0, output_size);
@@ -663,13 +665,13 @@ int SeedVR2DiTBlock::load_branch(const ncnn::ModelBin &mb, BranchWeights &branch
     if (branch.attn_shift.empty() || branch.attn_scale.empty() || branch.attn_gate.empty() || branch.mlp_shift.empty() || branch.mlp_scale.empty() || branch.mlp_gate.empty())
         return -100;
 
-    branch.qkv = load_inner_product(mb, dim, dim * 3, false, vkdev);
-    branch.proj_out = load_inner_product(mb, dim, dim, true, vkdev);
+    branch.qkv = load_inner_product(mb, dim, dim * 3, false, this);
+    branch.proj_out = load_inner_product(mb, dim, dim, true, this);
     branch.norm_q = mb.load(head_dim, 1);
     branch.norm_k = mb.load(head_dim, 1);
-    branch.mlp_gate_proj = load_inner_product(mb, dim, mlp_hidden, false, vkdev);
-    branch.mlp_in_proj = load_inner_product(mb, dim, mlp_hidden, false, vkdev);
-    branch.mlp_out_proj = load_inner_product(mb, mlp_hidden, dim, false, vkdev);
+    branch.mlp_gate_proj = load_inner_product(mb, dim, mlp_hidden, false, this);
+    branch.mlp_in_proj = load_inner_product(mb, dim, mlp_hidden, false, this);
+    branch.mlp_out_proj = load_inner_product(mb, mlp_hidden, dim, false, this);
     if (!branch.qkv || !branch.proj_out || branch.norm_q.empty() || branch.norm_k.empty() || !branch.mlp_gate_proj || !branch.mlp_in_proj || !branch.mlp_out_proj)
         return -100;
     return 0;

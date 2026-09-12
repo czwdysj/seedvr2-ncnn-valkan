@@ -17,7 +17,7 @@ namespace
 {
 ncnn::Layer* load_inner_product(const ncnn::ModelBin& mb, int input_size,
                                 int output_size, bool bias,
-                                const ncnn::VulkanDevice* vkdev)
+                                const ncnn::Layer* owner)
 {
     ncnn::Layer* layer = ncnn::create_layer("InnerProduct");
     if (!layer)
@@ -25,8 +25,10 @@ ncnn::Layer* load_inner_product(const ncnn::ModelBin& mb, int input_size,
 #if NCNN_VULKAN
     // 关键：必须在 load_param 之前设置 vkdev。Layer_final::load_param 里若 vkdev
     // 为空会把 layer_vulkan 删除（fallback 到 CPU），之后就无法走 Vulkan 了。
-    if (vkdev)
-        layer->vkdev = vkdev;
+    if (owner && owner->vkdev)
+        layer->vkdev = owner->vkdev;
+#else
+    (void)owner;
 #endif
     ncnn::ParamDict pd;
     pd.set(0, output_size);
@@ -214,11 +216,11 @@ int SeedVR2DiTInput::load_param(const ncnn::ParamDict& pd)
 
 int SeedVR2DiTInput::load_model(const ncnn::ModelBin& mb)
 {
-    video_projection = load_inner_product(mb, video_channels * 4, dim, true, vkdev);
-    text_projection = load_inner_product(mb, text_channels, dim, true, vkdev);
-    time_projection_in = load_inner_product(mb, sinusoidal_dim, dim, true, vkdev);
-    time_projection_hidden = load_inner_product(mb, dim, dim, true, vkdev);
-    time_projection_out = load_inner_product(mb, dim, embedding_dim, true, vkdev);
+    video_projection = load_inner_product(mb, video_channels * 4, dim, true, this);
+    text_projection = load_inner_product(mb, text_channels, dim, true, this);
+    time_projection_in = load_inner_product(mb, sinusoidal_dim, dim, true, this);
+    time_projection_hidden = load_inner_product(mb, dim, dim, true, this);
+    time_projection_out = load_inner_product(mb, dim, embedding_dim, true, this);
     return video_projection && text_projection && time_projection_in
             && time_projection_hidden && time_projection_out
         ? 0
