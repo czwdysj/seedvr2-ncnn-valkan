@@ -66,6 +66,11 @@ endif()
 if(SEEDVR2_BUILD_TESTS)
     enable_testing()
 
+    if(SEEDVR2_BUILD_APPS)
+        add_test(NAME seedvr2_cli_help COMMAND seedvr2-ncnn-vulkan --help)
+        set_tests_properties(seedvr2_cli_help PROPERTIES LABELS "smoke;cli")
+    endif()
+
     add_executable(seedvr2_runtime_unit_test tests/runtime_unit_test.cpp)
     target_include_directories(seedvr2_runtime_unit_test PRIVATE src)
     target_link_libraries(seedvr2_runtime_unit_test PRIVATE seedvr2_ncnn)
