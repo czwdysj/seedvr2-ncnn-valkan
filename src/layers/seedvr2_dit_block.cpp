@@ -180,9 +180,10 @@ void main()
 // shader 3：qkv_prepare —— Q/K/V 的 RMSNorm + MM-RoPE 旋转 + bf16 舍入
 // ============================================================================
 // 每个 work item 处理一个 (head, token)，串行遍历 head_dim 维。token 分两类：
-//   - 视频 token（token < video_length）：源是 vid_qkv，RoPE 位置为窗口内相对
-//     坐标 (text_length + t_local, y_local, x_local)；
-//   - 文本 token（token >= video_length）：源是 txt_qkv，RoPE 位置为 (text,text,text)。
+//   - 视频 token（token < video_length）：使用视频分支 QK Norm，MM-RoPE 坐标为
+//     (text_length + t_local, y_local, x_local)；
+//   - 文本 token（token >= video_length）：使用文本分支 QK Norm，MM-RoPE 坐标为
+//     (text,text,text)。这对应当前 3B 权重使用的 dit_v2 mmrope3d，而非 dit/v1。
 //
 // q/k 流程：head_dim 维 RMSNorm → 乘 norm_q/norm_k 的 gamma → MM-RoPE 旋转前
 // 126 维（3 axis × 21 pair × 2）→ bf16 舍入。v 只做 bf16 舍入。
@@ -197,6 +198,8 @@ layout(binding = 4, std430) writeonly buffer v_data { sfp v_blob[]; };
 layout(binding = 5, std430) readonly buffer norm_q_data { sfp norm_q_blob[]; };
 layout(binding = 6, std430) readonly buffer norm_k_data { sfp norm_k_blob[]; };
 layout(binding = 7, std430) readonly buffer freqs_data { float freqs_blob[]; };
+layout(binding = 8, std430) readonly buffer txt_norm_q_data { sfp txt_norm_q_blob[]; };
+layout(binding = 9, std430) readonly buffer txt_norm_k_data { sfp txt_norm_k_blob[]; };
 
 layout(push_constant) uniform parameter {
     uint heads;
@@ -285,11 +288,13 @@ void main()
     {
         float qv = is_text ? buffer_ld1(txt_qkv_blob, q_src + d) : buffer_ld1(vid_qkv_blob, q_src + d);
         float kv = is_text ? buffer_ld1(txt_qkv_blob, k_src + d) : buffer_ld1(vid_qkv_blob, k_src + d);
-        q_local[d] = qv * q_inv * buffer_ld1(norm_q_blob, d);
-        k_local[d] = kv * k_inv * buffer_ld1(norm_k_blob, d);
+        float q_gamma = is_text ? buffer_ld1(txt_norm_q_blob, d) : buffer_ld1(norm_q_blob, d);
+        float k_gamma = is_text ? buffer_ld1(txt_norm_k_blob, d) : buffer_ld1(norm_k_blob, d);
+        q_local[d] = qv * q_inv * q_gamma;
+        k_local[d] = kv * k_inv * k_gamma;
     }
 
-    // 阶段三：MM-RoPE 旋转前 3*42 维（3 轴 × 21 对 × 2）。
+    // dit_v2 NaMMRotaryEmbedding3d 同时旋转视频和文本，二者使用不同坐标。
     for (uint axis = 0u; axis < 3u; axis++)
     {
         float pos = (axis == 0u) ? float(pos_t) : ((axis == 1u) ? float(pos_h) : float(pos_w));
@@ -579,7 +584,8 @@ SeedVR2DiTBlock::SeedVR2DiTBlock()
       runtime_frames(0),
       runtime_height(0),
       runtime_width(0),
-      runtime_shape_valid(false)
+      runtime_shape_valid(false),
+      debug_tensors(nullptr)
 {
     one_blob_only = false;
     support_inplace = false;
@@ -604,6 +610,11 @@ void SeedVR2DiTBlock::set_runtime_shape(int frames, int height, int width)
     runtime_height = height;
     runtime_width = width;
     runtime_shape_valid = frames > 0 && height > 0 && width > 0;
+}
+
+void SeedVR2DiTBlock::set_debug_tensors(SeedVR2DiTBlockDebugTensors* tensors)
+{
+    debug_tensors = tensors;
 }
 
 SeedVR2DiTBlock::~SeedVR2DiTBlock()
@@ -883,14 +894,37 @@ int SeedVR2DiTBlock::attention(
     const float attention_scale = 1.f / std::sqrt(static_cast<float>(head_dim));
     const float *frequencies = rope_freqs;
 
+    std::vector<int> sequence_offsets(windows.size());
+    int captured_sequence_length = 0;
+    for (size_t index = 0; index < windows.size(); ++index)
+    {
+        sequence_offsets[index] = captured_sequence_length;
+        const Window& window = windows[index];
+        captured_sequence_length += (window.t1 - window.t0) * (window.h1 - window.h0)
+                                    * (window.w1 - window.w0) + text_length;
+    }
+    if (debug_tensors)
+    {
+        debug_tensors->norm_q_vid.create(dim, vid_qkv.h);
+        debug_tensors->norm_k_vid.create(dim, vid_qkv.h);
+        debug_tensors->norm_q_txt.create(dim, text_length);
+        debug_tensors->norm_k_txt.create(dim, text_length);
+        debug_tensors->attention_q.create(dim, captured_sequence_length);
+        debug_tensors->attention_k.create(dim, captured_sequence_length);
+        debug_tensors->attention_v.create(dim, captured_sequence_length);
+        debug_tensors->attention_output.create(dim, captured_sequence_length);
+    }
+
     // 每个 head 独占自己的输出通道，窗口在同一 head 内顺序执行，避免文本
     // 汇聚产生写冲突；视频窗口本身是分区，每个 token 只写一次。
 #pragma omp parallel for num_threads(opt.num_threads)
     for (int head = 0; head < heads; head++)
     {
         std::vector<float> text_accumulator(static_cast<size_t>(text_length) * head_dim, 0.f);
-        for (const Window &window : windows)
+        for (size_t window_index = 0; window_index < windows.size(); ++window_index)
         {
+            const Window& window = windows[window_index];
+            const int sequence_offset = sequence_offsets[window_index];
             const int local_t = window.t1 - window.t0;
             const int local_h = window.h1 - window.h0;
             const int local_w = window.w1 - window.w0;
@@ -904,8 +938,9 @@ int SeedVR2DiTBlock::attention(
             std::vector<float> scores(sequence_length);
 
             auto normalize_and_rotate = [&](const float *source, const float *gamma,
-                                            float *destination, int position_t,
-                                            int position_h, int position_w)
+                                            float *destination, bool apply_rope,
+                                            int position_t, int position_h, int position_w,
+                                            float* normalized_debug)
             {
                 double square_sum = 0.0;
                 for (int d = 0; d < head_dim; d++)
@@ -913,19 +948,25 @@ int SeedVR2DiTBlock::attention(
                 const float inverse_rms = 1.f / std::sqrt(static_cast<float>(square_sum / head_dim) + norm_eps);
                 for (int d = 0; d < head_dim; d++)
                     destination[d] = source[d] * inverse_rms * gamma[d];
-                const int positions[3] = {position_t, position_h, position_w};
-                for (int axis = 0; axis < 3; axis++)
-                    for (int pair = 0; pair < 21; pair++)
-                    {
-                        const int d = axis * 42 + pair * 2;
-                        const float angle = positions[axis] * frequencies[pair];
-                        const float cosine = std::cos(angle);
-                        const float sine = std::sin(angle);
-                        const float first = destination[d];
-                        const float second = destination[d + 1];
-                        destination[d] = first * cosine - second * sine;
-                        destination[d + 1] = second * cosine + first * sine;
-                    }
+                if (normalized_debug)
+                    std::memcpy(normalized_debug, destination,
+                                static_cast<size_t>(head_dim) * sizeof(float));
+                if (apply_rope)
+                {
+                    const int positions[3] = {position_t, position_h, position_w};
+                    for (int axis = 0; axis < 3; axis++)
+                        for (int pair = 0; pair < 21; pair++)
+                        {
+                            const int d = axis * 42 + pair * 2;
+                            const float angle = positions[axis] * frequencies[pair];
+                            const float cosine = std::cos(angle);
+                            const float sine = std::sin(angle);
+                            const float first = destination[d];
+                            const float second = destination[d + 1];
+                            destination[d] = first * cosine - second * sine;
+                            destination[d + 1] = second * cosine + first * sine;
+                        }
+                }
                 for (int d = 0; d < head_dim; d++)
                     destination[d] = round_to_bfloat16(destination[d]);
             };
@@ -942,12 +983,14 @@ int SeedVR2DiTBlock::attention(
                             row + head * head_dim,
                             vid_branch.norm_q,
                             q.data() + static_cast<size_t>(token) * head_dim,
-                            text_length + (t - window.t0), y - window.h0, x - window.w0);
+                            true, text_length + (t - window.t0), y - window.h0, x - window.w0,
+                            debug_tensors ? debug_tensors->norm_q_vid.row(index) + head * head_dim : nullptr);
                         normalize_and_rotate(
                             row + dim + head * head_dim,
                             vid_branch.norm_k,
                             k.data() + static_cast<size_t>(token) * head_dim,
-                            text_length + (t - window.t0), y - window.h0, x - window.w0);
+                            true, text_length + (t - window.t0), y - window.h0, x - window.w0,
+                            debug_tensors ? debug_tensors->norm_k_vid.row(index) + head * head_dim : nullptr);
                         std::memcpy(
                             v.data() + static_cast<size_t>(token) * head_dim,
                             row + dim * 2 + head * head_dim,
@@ -963,12 +1006,16 @@ int SeedVR2DiTBlock::attention(
                     row + head * head_dim,
                     txt_branch.norm_q,
                     q.data() + static_cast<size_t>(token) * head_dim,
-                    text, text, text);
+                    true, text, text, text,
+                    debug_tensors && window_index == 0
+                        ? debug_tensors->norm_q_txt.row(text) + head * head_dim : nullptr);
                 normalize_and_rotate(
                     row + dim + head * head_dim,
                     txt_branch.norm_k,
                     k.data() + static_cast<size_t>(token) * head_dim,
-                    text, text, text);
+                    true, text, text, text,
+                    debug_tensors && window_index == 0
+                        ? debug_tensors->norm_k_txt.row(text) + head * head_dim : nullptr);
                 std::memcpy(
                     v.data() + static_cast<size_t>(token) * head_dim,
                     row + dim * 2 + head * head_dim,
@@ -976,6 +1023,21 @@ int SeedVR2DiTBlock::attention(
                 float *value = v.data() + static_cast<size_t>(token) * head_dim;
                 for (int d = 0; d < head_dim; d++)
                     value[d] = round_to_bfloat16(value[d]);
+            }
+
+            if (debug_tensors)
+            {
+                for (int sequence = 0; sequence < sequence_length; ++sequence)
+                {
+                    const size_t source_offset = static_cast<size_t>(sequence) * head_dim;
+                    const int capture_row = sequence_offset + sequence;
+                    std::memcpy(debug_tensors->attention_q.row(capture_row) + head * head_dim,
+                                q.data() + source_offset, static_cast<size_t>(head_dim) * sizeof(float));
+                    std::memcpy(debug_tensors->attention_k.row(capture_row) + head * head_dim,
+                                k.data() + source_offset, static_cast<size_t>(head_dim) * sizeof(float));
+                    std::memcpy(debug_tensors->attention_v.row(capture_row) + head * head_dim,
+                                v.data() + source_offset, static_cast<size_t>(head_dim) * sizeof(float));
+                }
             }
 
             for (int query = 0; query < sequence_length; query++)
@@ -1007,7 +1069,10 @@ int SeedVR2DiTBlock::attention(
                     double sum = 0.0;
                     for (int key = 0; key < sequence_length; key++)
                         sum += static_cast<double>(scores[key] / denominator) * v[static_cast<size_t>(key) * head_dim + d];
-                    destination[d] += round_to_bfloat16(static_cast<float>(sum));
+                    const float rounded = round_to_bfloat16(static_cast<float>(sum));
+                    destination[d] += rounded;
+                    if (debug_tensors)
+                        debug_tensors->attention_output.row(sequence_offset + query)[head * head_dim + d] = rounded;
                 }
             }
         }
@@ -1093,6 +1158,11 @@ int SeedVR2DiTBlock::forward(
                      block_index, vid_qkv_result, txt_qkv_result);
         return -100;
     }
+    if (debug_tensors)
+    {
+        debug_tensors->qkv_vid = vid_qkv.clone();
+        debug_tensors->qkv_txt = txt_qkv.clone();
+    }
     ncnn::Mat vid_attention;
     ncnn::Mat txt_attention;
     const int attention_result = attention(vid_qkv, txt_qkv, vid_shape, vid_weights,
@@ -1112,6 +1182,11 @@ int SeedVR2DiTBlock::forward(
         std::fprintf(stderr, "SeedVR2DiTBlock[%d]: attention projection failed (vid=%d txt=%d)\n",
                      block_index, vid_proj_result, txt_proj_result);
         return -100;
+    }
+    if (debug_tensors)
+    {
+        debug_tensors->projected_vid = vid_projected.clone();
+        debug_tensors->projected_txt = txt_projected.clone();
     }
     apply_ada_output_and_residual(vid_projected, vid, embedding, vid_weights.attn_gate, 0);
     if (!last_layer)
@@ -1161,6 +1236,11 @@ int SeedVR2DiTBlock::forward(
                 data[channel] *= 2.f;
         }
         top_blobs[1] = txt_last;
+        if (debug_tensors)
+        {
+            debug_tensors->output_vid = top_blobs[0].clone();
+            debug_tensors->output_txt = top_blobs[1].clone();
+        }
         return 0;
     }
     ncnn::Mat txt_mlp_input = txt_projected.clone(opt.blob_allocator);
@@ -1176,6 +1256,11 @@ int SeedVR2DiTBlock::forward(
     }
     apply_ada_output_and_residual(txt_mlp, txt_projected, embedding, text_branch.mlp_gate, 1);
     top_blobs[1] = txt_mlp;
+    if (debug_tensors)
+    {
+        debug_tensors->output_vid = top_blobs[0].clone();
+        debug_tensors->output_txt = top_blobs[1].clone();
+    }
     return 0;
 }
 
@@ -1411,7 +1496,7 @@ int SeedVR2DiTBlock::forward(
 
         // qkv_prepare：算窗口内 seq 个 token 的 q/k/v（MM-RoPE + bf16）。
         {
-            std::vector<ncnn::VkMat> bindings(8);
+            std::vector<ncnn::VkMat> bindings(10);
             bindings[0] = vid_qkv;
             bindings[1] = txt_qkv;
             bindings[2] = q_ws;
@@ -1420,6 +1505,8 @@ int SeedVR2DiTBlock::forward(
             bindings[5] = vid_weights.norm_q_gpu;
             bindings[6] = vid_weights.norm_k_gpu;
             bindings[7] = rope_freqs_gpu;
+            bindings[8] = text_branch.norm_q_gpu;
+            bindings[9] = text_branch.norm_k_gpu;
 
             const uint32_t total = static_cast<uint32_t>(heads) * seq;
             std::vector<ncnn::vk_constant_type> constants(15);

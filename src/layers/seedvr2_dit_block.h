@@ -14,6 +14,27 @@
 
 #include <layer.h>
 
+// 测试工具可选择接收一次 CPU forward 的关键中间张量。所有张量均使用
+// [L,C] FP32 Mat 保存，其中 Q/K/V 的 C=heads*head_dim；正式推理不设置该指针，
+// 因而不会产生额外复制或文件 I/O。
+struct SeedVR2DiTBlockDebugTensors
+{
+    ncnn::Mat qkv_vid;
+    ncnn::Mat qkv_txt;
+    ncnn::Mat norm_q_vid;
+    ncnn::Mat norm_q_txt;
+    ncnn::Mat norm_k_vid;
+    ncnn::Mat norm_k_txt;
+    ncnn::Mat attention_q;
+    ncnn::Mat attention_k;
+    ncnn::Mat attention_v;
+    ncnn::Mat attention_output;
+    ncnn::Mat projected_vid;
+    ncnn::Mat projected_txt;
+    ncnn::Mat output_vid;
+    ncnn::Mat output_txt;
+};
+
 class SeedVR2DiTBlock : public ncnn::Layer
 {
 public:
@@ -32,6 +53,9 @@ public:
     // 窗口划分只依赖 patch 后的 T/H/W；由 DiT 调度器在执行前注入，避免
     // 每个 Transformer block 都把 vid_shape 从 GPU 下载回 CPU。
     void set_runtime_shape(int frames, int height, int width);
+
+    // 仅用于分阶段数值对齐；调用方负责保证接收对象覆盖 forward 生命周期。
+    void set_debug_tensors(SeedVR2DiTBlockDebugTensors* tensors);
 
 #if NCNN_VULKAN
     int upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt) override;
@@ -126,6 +150,7 @@ private:
     int runtime_height;
     int runtime_width;
     bool runtime_shape_valid;
+    SeedVR2DiTBlockDebugTensors* debug_tensors;
     BranchWeights vid_weights;
     BranchWeights txt_weights;
     ncnn::Mat rope_freqs;
