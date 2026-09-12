@@ -50,7 +50,9 @@ def metrics(actual: np.ndarray, expected: np.ndarray) -> dict[str, float]:
                       * np.sum(expected.astype(np.float64) ** 2))),
         1e-12,
     )
+    finite = bool(np.isfinite(actual).all() and np.isfinite(expected).all())
     return {
+        "finite": finite,
         "max_abs": float(np.abs(difference).max()),
         "mean_abs": float(np.abs(difference).mean()),
         "rmse": rmse,
@@ -135,7 +137,10 @@ def validate_case(args: argparse.Namespace, reference: Path, temporary: Path) ->
                     args.block_output_dir
                     / f"{reference.name}_{args.branch}_block_{index:02d}_{branch}.f32",
                 )
-        item["passed"] = all(item[branch]["nrmse"] <= args.block_nrmse for branch in ("vid", "txt"))
+        item["passed"] = all(
+            item[branch]["finite"] and item[branch]["nrmse"] <= args.block_nrmse
+            for branch in ("vid", "txt")
+        )
         if args.capture_intermediates:
             reference_names = {
                 "qkv_vid": "qkv_vid",
@@ -215,7 +220,8 @@ def validate_case(args: argparse.Namespace, reference: Path, temporary: Path) ->
             args.full_output_dir / f"{reference.name}_{condition_branch}.f32",
         )
     result["full_passed"] = (
-        result["full"]["nrmse"] <= args.full_nrmse
+        result["full"]["finite"]
+        and result["full"]["nrmse"] <= args.full_nrmse
         and result["full"]["cosine"] >= args.full_cosine
     )
     result["passed"] = (
@@ -237,9 +243,11 @@ def main() -> int:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--block-runner", type=Path, required=True)
     parser.add_argument("--full-runner", type=Path, required=True)
-    parser.add_argument("--block-nrmse", type=float, default=0.01)
-    parser.add_argument("--full-nrmse", type=float, default=0.002)
-    parser.add_argument("--full-cosine", type=float, default=0.999999)
+    # 单层门槛用于发现算子/布局错误；完整门槛允许 FP16 权重、BF16 attention
+    # 与不同 GEMM 累加顺序经过 32 层后的合理误差，但仍能拦截此前约 0.21 的错误。
+    parser.add_argument("--block-nrmse", type=float, default=0.002)
+    parser.add_argument("--full-nrmse", type=float, default=0.02)
+    parser.add_argument("--full-cosine", type=float, default=0.9998)
     parser.add_argument("--full-only", action="store_true")
     parser.add_argument("--blocks-only", action="store_true")
     parser.add_argument("--blocks", type=parse_block_indices, default=list(range(32)))
