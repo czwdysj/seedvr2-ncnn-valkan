@@ -54,7 +54,9 @@ check_dependencies()
             local summary
             summary="$(vulkaninfo --summary 2>&1)" \
                 || die "vulkaninfo failed. Check the GPU driver and WSL2 GPU passthrough."
-            echo "$summary" | grep -Eiq 'NVIDIA|AMD|Radeon|Intel' \
+            echo "$summary" \
+                | grep -Ei 'deviceName.*(NVIDIA|AMD|Radeon|Intel)' \
+                | grep -Eivq 'llvmpipe|lavapipe|software' \
                 || die "no hardware Vulkan GPU was found (software llvmpipe/lavapipe is unsupported)."
             echo "[build] Vulkan hardware device detected."
         fi

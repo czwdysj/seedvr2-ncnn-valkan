@@ -1,0 +1,49 @@
+# 本工作流验证公开仓库可以从递归 clone 等价状态完成 Linux 构建。
+# CI 没有物理 Vulkan GPU，因此使用 CPU-only 配置验证源码、固定子模块、补丁幂等性、
+# CLI 和核心单元测试；RTX 5090 Vulkan 与完整模型推理仍作为发布前人工门禁。
+name: Linux build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ffmpeg
+
+      - name: Check scripts
+        run: bash -n build.sh download-models.sh scripts/verify-models.sh
+
+      - name: Build and run smoke tests
+        env:
+          BUILD_DIR: build-ci
+          JOBS: 2
+          SEEDVR2_ENABLE_VULKAN: "OFF"
+          SEEDVR2_SKIP_GPU_CHECK: "1"
+        run: ./build.sh
+
+      - name: Verify install layout
+        run: |
+          cmake --install build-ci --prefix "$PWD/dist"
+          test -x dist/bin/seedvr2-ncnn-vulkan
+          test -f dist/include/seedvr2/engine.h
+          test -f dist/lib/libseedvr2_ncnn.a
+          test -f dist/lib/cmake/seedvr2_ncnn/seedvr2_ncnnConfig.cmake
+
+      - name: Build an external CMake consumer
+        run: |
+          cmake -S tests/install_consumer -B build-consumer \
+            -DCMAKE_PREFIX_PATH="$PWD/dist"
+          cmake --build build-consumer --parallel 2
+          ./build-consumer/seedvr2_install_consumer
