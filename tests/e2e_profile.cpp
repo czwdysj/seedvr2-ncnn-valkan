@@ -7,9 +7,11 @@
 // 默认小参数：T=5（满足 (T-1)%4==0 的最小多帧数）、H=W=64、text tokens=8。
 #include "seedvr2/engine.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -46,13 +48,25 @@ int main(int argc, char** argv)
     positive.data.resize(static_cast<std::size_t>(tokens) * 5120);
     for (float& v : positive.data)
         v = dist(rng);
-    seedvr2::TextEmbedding negative;   // cfg_scale=1.0 时不需要
+    seedvr2::TextEmbedding negative;
+    negative.tokens = tokens;
+    negative.channels = 5120;
+    negative.data.resize(static_cast<std::size_t>(tokens) * 5120);
+    for (float& v : negative.data)
+        v = dist(rng);
 
     seedvr2::RuntimeOptions opts;
-    opts.device = seedvr2::DeviceType::Vulkan;
+    const char* device = std::getenv("SEEDVR2_DEVICE");
+    opts.device = device && std::strcmp(device, "cpu") == 0
+        ? seedvr2::DeviceType::Cpu
+        : seedvr2::DeviceType::Vulkan;
     opts.num_threads = 8;
-    opts.sampling_steps = 1;
-    opts.cfg_scale = 1.0f;
+    const char* steps = std::getenv("SEEDVR2_STEPS");
+    const char* cfg_scale = std::getenv("SEEDVR2_CFG_SCALE");
+    const char* cfg_rescale = std::getenv("SEEDVR2_CFG_RESCALE");
+    opts.sampling_steps = steps ? std::max(1, std::atoi(steps)) : 1;
+    opts.cfg_scale = cfg_scale ? std::strtof(cfg_scale, nullptr) : 1.0f;
+    opts.cfg_rescale = cfg_rescale ? std::strtof(cfg_rescale, nullptr) : 0.0f;
     opts.seed = 666;
     // 通过环境变量 SEEDVR2_DIT_RESIDENT=1 切换常驻模式（默认流式）。
     opts.dit_resident = std::getenv("SEEDVR2_DIT_RESIDENT") != nullptr;
@@ -75,5 +89,17 @@ int main(int argc, char** argv)
     }
     std::printf("process OK: output %dx%dx%d frames=%d channels=%d\n",
                 output.width, output.height, output.frames, output.frames, output.channels);
+    const char* output_path = std::getenv("SEEDVR2_OUTPUT_RAW");
+    if (output_path)
+    {
+        std::ofstream stream(output_path, std::ios::binary);
+        stream.write(reinterpret_cast<const char*>(output.data.data()),
+                     static_cast<std::streamsize>(output.data.size() * sizeof(float)));
+        if (!stream)
+        {
+            std::fprintf(stderr, "failed to write output: %s\n", output_path);
+            return 1;
+        }
+    }
     return 0;
 }

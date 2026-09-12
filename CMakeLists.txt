@@ -125,6 +125,11 @@ if(SEEDVR2_BUILD_TESTS)
         target_link_libraries(seedvr2_conv3d_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_conv3d_vulkan_runner COMMAND seedvr2_conv3d_vulkan_runner)
 
+        add_executable(seedvr2_sampler_vulkan_runner tests/sampler_vulkan_runner.cpp)
+        target_include_directories(seedvr2_sampler_vulkan_runner PRIVATE src)
+        target_link_libraries(seedvr2_sampler_vulkan_runner PRIVATE seedvr2_ncnn)
+        add_test(NAME seedvr2_sampler_vulkan_runner COMMAND seedvr2_sampler_vulkan_runner)
+
         add_executable(seedvr2_perf_bench tests/perf_bench.cpp)
         target_include_directories(seedvr2_perf_bench PRIVATE src)
         target_link_libraries(seedvr2_perf_bench PRIVATE seedvr2_ncnn)

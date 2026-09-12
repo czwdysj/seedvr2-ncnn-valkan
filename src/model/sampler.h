@@ -8,12 +8,17 @@
 #include <string>
 #include <vector>
 
+#if NCNN_VULKAN
+#include "core/runtime_context.h"
+#endif
+
 namespace seedvr2
 {
 class EulerSampler
 {
 public:
     explicit EulerSampler(int steps);
+    ~EulerSampler();
 
     const std::vector<float>& timesteps() const noexcept { return timesteps_; }
     int apply_cfg(const ncnn::Mat& positive,
@@ -34,7 +39,48 @@ public:
                  ncnn::Mat& output,
                  std::string& error) const;
 
+#if NCNN_VULKAN
+    int initialize_vulkan(const RuntimeContext& context, std::string& error);
+    int make_condition_vulkan(const ncnn::VkMat& encoded,
+                              const ncnn::VkMat& augment_noise,
+                              float ratio,
+                              VulkanExecutionContext& execution,
+                              ncnn::VkCompute& command,
+                              ncnn::VkMat& output,
+                              std::string& error) const;
+    int make_dit_input_vulkan(const ncnn::VkMat& latent,
+                              const ncnn::VkMat& condition,
+                              VulkanExecutionContext& execution,
+                              ncnn::VkCompute& command,
+                              ncnn::VkMat& output,
+                              std::string& error) const;
+    int apply_cfg_vulkan(const ncnn::VkMat& positive,
+                         const ncnn::VkMat& negative,
+                         float scale,
+                         float rescale,
+                         VulkanExecutionContext& execution,
+                         ncnn::VkCompute& command,
+                         ncnn::VkMat& output,
+                         std::string& error) const;
+    int step_vulkan(const ncnn::VkMat& prediction,
+                    const ncnn::VkMat& current,
+                    float timestep,
+                    float next_timestep,
+                    VulkanExecutionContext& execution,
+                    ncnn::VkCompute& command,
+                    ncnn::VkMat& output,
+                    std::string& error) const;
+#endif
+
 private:
     std::vector<float> timesteps_;
+#if NCNN_VULKAN
+    ncnn::Pipeline* pipeline_condition_ = nullptr;
+    ncnn::Pipeline* pipeline_dit_input_ = nullptr;
+    ncnn::Pipeline* pipeline_cfg_ = nullptr;
+    ncnn::Pipeline* pipeline_cfg_stats_ = nullptr;
+    ncnn::Pipeline* pipeline_cfg_rescale_ = nullptr;
+    ncnn::Pipeline* pipeline_euler_ = nullptr;
+#endif
 };
 } // namespace seedvr2
