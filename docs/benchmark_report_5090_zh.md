@@ -78,7 +78,7 @@
 
 ## 6. 附：本报告发现并修复的 bug
 
-- **`popen(cmd, "rb")` 在 POSIX 下 EINVAL**：glibc 的 popen mode 只接受 "r"/"w"（"rb" 非法），Windows `_popen` 才接受 "rb"。已修：跨平台宏区分。此前 CLI 的 mp4 解码在 Linux 上从未真正跑通（冒烟只测了 usage 路径）。
+- **`popen(cmd, "rb")` 在 POSIX 下 EINVAL**：glibc 的 popen mode 只接受 "r"/"w"。Linux 管道不做文本换行转换，因此改用标准的 `"r"/"w"` 模式。此前 CLI 的 mp4 解码在 Linux 上从未真正跑通（冒烟只测了 usage 路径）。
 - **镜像里的 `seedvr2_ema_3b.pth`（13GB）损坏**：aria2 多线程下载被中断留下空洞文件，`torch.load` 报 central directory 错误。已用 `huggingface_hub` 重新下载并 zip 校验通过。
 
 ## 7. 数据落盘位置

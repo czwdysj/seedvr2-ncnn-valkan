@@ -1,5 +1,5 @@
-// 本文件是 seedvr2-ncnn-vulkan 的正式命令行入口，对齐 zimage-ncnn-vulkan 的
-// 使用体验：一条命令完成 mp4 → mp4 视频修复。
+// 本文件是 seedvr2-ncnn-vulkan 的 Linux/WSL2 正式命令行入口，对齐
+// zimage-ncnn-vulkan 的使用体验：一条命令完成 mp4 → mp4 视频修复。
 //
 // 媒体编解码不进入核心库：CLI 通过调用系统 ffmpeg/ffprobe 完成 mp4 解码与
 // 编码（帧数据经 rgb24 raw 交换），因此用户只需安装 ffmpeg 并加入 PATH。
@@ -29,22 +29,7 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
 #include <sys/wait.h>
-#endif
-
-#ifdef _WIN32
-#define POPEN _popen
-#define POPEN_READ_MODE "rb"
-#define POPEN_WRITE_MODE "wb"
-#define PCLOSE _pclose
-#else
-// POSIX popen 的 mode 只接受 "r"/"w"（"rb" 会 EINVAL），二进制语义即默认行为。
-#define POPEN popen
-#define POPEN_READ_MODE "r"
-#define POPEN_WRITE_MODE "w"
-#define PCLOSE pclose
-#endif
 
 namespace
 {
@@ -62,21 +47,14 @@ struct Options
     bool resident = false;
 };
 
-// ffmpeg/ffprobe 仍由 shell 启动，因此所有来自用户的路径必须作为一个参数转义。
-// POSIX 使用单引号并把内部单引号展开为 '\''；Windows 使用 cmd 的双引号规则。
+// ffmpeg/ffprobe 由 POSIX shell 启动，因此所有来自用户的路径必须作为一个参数转义。
+// 单引号中的单引号需要结束当前字符串、写入转义字符，再重新进入单引号字符串。
 std::string shell_quote(const std::string& value)
 {
-#ifdef _WIN32
-    std::string result = "\"";
-    for (const char character : value)
-        result += character == '"' ? "\"\"" : std::string(1, character);
-    return result + "\"";
-#else
     std::string result = "'";
     for (const char character : value)
         result += character == '\'' ? "'\\''" : std::string(1, character);
     return result + "'";
-#endif
 }
 
 bool parse_int(const std::string& text, int minimum, int maximum, int& output)
@@ -115,30 +93,22 @@ bool parse_float(const std::string& text, float minimum, float maximum, float& o
 
 bool run_command(const std::string& command)
 {
-    FILE* stream = POPEN(command.c_str(), "r");
+    FILE* stream = popen(command.c_str(), "r");
     if (stream == nullptr)
         return false;
     char buffer[256];
     while (std::fread(buffer, 1, sizeof(buffer), stream) > 0)
     {
     }
-    const int status = PCLOSE(stream);
-#ifdef _WIN32
-    return status == 0;
-#else
+    const int status = pclose(stream);
     return status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-#endif
 }
 
 bool tool_available(const char* tool)
 {
     std::string command = std::string(tool)
         + " -version" + std::string(" >")
-#ifdef _WIN32
-        + "nul"
-#else
         + "/dev/null"
-#endif
         + " 2>&1";
     return run_command(command);
 }
@@ -149,12 +119,12 @@ bool probe_video(const std::string& path, int& width, int& height, float& fps)
     const std::string command =
         "ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate "
         "-of csv=p=0 " + shell_quote(path);
-    FILE* stream = POPEN(command.c_str(), "r");
+    FILE* stream = popen(command.c_str(), "r");
     if (stream == nullptr)
         return false;
     char line[256] = {0};
     const bool ok = std::fgets(line, sizeof(line), stream) != nullptr;
-    PCLOSE(stream);
+    pclose(stream);
     if (!ok)
         return false;
     int num = 0, den = 1;
@@ -175,7 +145,8 @@ bool decode_frames(const std::string& path,
 {
     const std::string command =
         "ffmpeg -v error -i " + shell_quote(path) + " -f rawvideo -pix_fmt rgb24 -";
-    FILE* stream = POPEN(command.c_str(), POPEN_READ_MODE);
+    // POSIX popen 只接受 "r"/"w"；Linux 管道本身不执行文本换行转换。
+    FILE* stream = popen(command.c_str(), "r");
     if (stream == nullptr)
         return false;
     const std::size_t frame_bytes = static_cast<std::size_t>(width) * height * 3;
@@ -190,16 +161,14 @@ bool decode_frames(const std::string& path,
         {
             std::fprintf(stderr, "[decode] partial frame: got %zu of %zu bytes\n",
                          got, frame_bytes);
-            PCLOSE(stream);
+            pclose(stream);
             return false;   // 尾部残帧（尺寸不完整）直接丢弃
         }
         frames.insert(frames.end(), buffer.begin(), buffer.end());
     }
-    const int status = PCLOSE(stream);
-#ifndef _WIN32
+    const int status = pclose(stream);
     if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         return false;
-#endif
     return !frames.empty();
 }
 
@@ -218,17 +187,13 @@ bool encode_video(const std::string& output,
         + " -i - -i " + shell_quote(input) + " -map 0:v -map 1:a? "
         + "-c:v libx264 -crf 18 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest "
         + shell_quote(output);
-    FILE* stream = POPEN(command.c_str(), POPEN_WRITE_MODE);
+    FILE* stream = popen(command.c_str(), "w");
     if (stream == nullptr)
         return false;
     const std::size_t total = static_cast<std::size_t>(frames) * width * height * 3;
     const bool ok = std::fwrite(rgb, 1, total, stream) == total;
-    const int status = PCLOSE(stream);
-#ifdef _WIN32
-    return ok && status == 0;
-#else
-    return ok && status != -1 && WEXITSTATUS(status) == 0;
-#endif
+    const int status = pclose(stream);
+    return ok && status != -1 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 void print_usage(const char* program)

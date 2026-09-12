@@ -64,7 +64,7 @@
 - 默认正负文本 embedding，可在不运行文本编码器的情况下推理。
 - 两组真实尺寸 PyTorch reference 和 CPU 数值验证资产。
 - 算子 benchmark、端到端 profile 和 PyTorch benchmark 的初始框架。
-- Linux/WSL2 与 Windows 构建脚本，以及 Hugging Face 权重下载脚本。
+- Linux/WSL2 一键构建脚本，以及 Hugging Face 权重下载脚本。
 
 主要代码入口：
 
@@ -237,7 +237,7 @@ CLI 在送入 Engine 前已经把帧数补到 `4n+1`，随后覆盖了本地 `fr
 - README 表述“支持动态分辨率”，但预处理实际中心裁剪到 16 的倍数，并可能丢弃边缘像素。
 - “纯 Vulkan 推理”容易让读者误认为全程为 `VkMat` 且没有 CPU 主数据流处理。
 - `docs/seedvr2_vulkan_development_plan_zh.md` 的若干“尚未实现”描述已经过时，需要后续单独更新。
-- Windows 构建提示引用 `download-models.bat`，但仓库中目前只有 shell 下载脚本。
+- 发布支持范围需要明确限定为 Linux/WSL2，避免把源码层面的可移植性误解为已验证平台。
 
 ## 2 原生 Linux GPU 测试操作手册
 
