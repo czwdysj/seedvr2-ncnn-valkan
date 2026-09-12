@@ -1,50 +1,112 @@
 #!/usr/bin/env bash
-# 一键构建 seedvr2-ncnn-vulkan（Linux / WSL2 / macOS）。
-# 流程：初始化 ncnn submodule → 应用 ncnn patches（Convolution3D Vulkan + cpu 修复）
-#       → CMake configure → 编译。产物：build/seedvr2-ncnn-vulkan
-#
-# 依赖：cmake >= 3.16、C++17 编译器、git、Vulkan 开发头文件
-#   Ubuntu/Debian: sudo apt install build-essential cmake git libvulkan-dev vulkan-tools
+# 本文件是 Linux/WSL2 的完整构建入口。
+# 输入为固定版本的 ncnn 子模块与 patches/ 中的兼容补丁，输出为可直接运行的
+# seedvr2-ncnn-vulkan 和轻量测试程序。脚本会检查编译器、CMake、Vulkan、
+# ffmpeg 和独立 GPU，逐个幂等应用补丁，并且只在 CTest 通过后报告构建成功。
+# CI 或仅验证 CPU 编译时可设置 SEEDVR2_ENABLE_VULKAN=OFF、SEEDVR2_SKIP_GPU_CHECK=1。
 set -euo pipefail
-cd "$(dirname "$0")"
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
-JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+ENABLE_VULKAN="${SEEDVR2_ENABLE_VULKAN:-ON}"
+BUILD_TESTS="${SEEDVR2_BUILD_TESTS:-ON}"
+SKIP_GPU_CHECK="${SEEDVR2_SKIP_GPU_CHECK:-0}"
 
-# 1. 初始化全部 git submodule（ncnn 及其 glslang 等，幂等，已就绪时秒回）。
-echo "[build] initializing git submodules ..."
-git submodule update --init --recursive \
-    || echo "[build] warning: some optional submodules failed to clone (pybind11 only matters for NCNN python bindings)."
-if [ ! -f ncnn/glslang/CMakeLists.txt ]; then
-    echo "[build] error: ncnn/glslang is missing (required for Vulkan shaders)."
-    echo "[build] hint: if github.com is unreachable, set a proxy first, e.g."
-    echo '[build]   git config --global url."https://gh-proxy.com/https://github.com/".insteadOf "https://github.com/"'
+die()
+{
+    echo "[build] error: $*" >&2
     exit 1
-fi
+}
 
-# 2. 应用项目自带的 ncnn patches（幂等：已应用则跳过）。
-if [ ! -f ncnn/src/layer/vulkan/convolution3d_vulkan.cpp ]; then
-    echo "[build] applying ncnn patches ..."
-    for patch_file in patches/*.patch; do
-        # git -C ncnn 会切换工作目录，patch 必须用绝对路径。
-        abs_patch="$(cd "$(dirname "$patch_file")" && pwd)/$(basename "$patch_file")"
-        if ! git -C ncnn apply --check "$abs_patch" 2>/dev/null; then
-            echo "[build] patch does not apply (maybe already applied or version drift): $patch_file"
-            exit 1
+require_command()
+{
+    command -v "$1" >/dev/null 2>&1 || die "missing command '$1'. $2"
+}
+
+version_at_least()
+{
+    printf '%s\n%s\n' "$2" "$1" | sort -V -C
+}
+
+check_dependencies()
+{
+    require_command git "Install it with: sudo apt install git"
+    require_command cmake "Install it with: sudo apt install cmake"
+    require_command c++ "Install it with: sudo apt install build-essential"
+    require_command ffmpeg "Install it with: sudo apt install ffmpeg"
+    require_command ffprobe "ffprobe is provided by the ffmpeg package."
+
+    local cmake_version
+    cmake_version="$(cmake --version | awk 'NR == 1 {print $3}')"
+    version_at_least "$cmake_version" "3.16" \
+        || die "CMake >= 3.16 is required, found $cmake_version"
+
+    if [ "$ENABLE_VULKAN" = "ON" ]; then
+        require_command vulkaninfo "Install Vulkan headers/tools with: sudo apt install libvulkan-dev vulkan-tools"
+        if [ ! -f /usr/include/vulkan/vulkan.h ] && ! pkg-config --exists vulkan 2>/dev/null; then
+            die "Vulkan headers were not found. Install libvulkan-dev."
         fi
-        git -C ncnn apply "$abs_patch"
-        echo "[build]   applied $(basename "$patch_file")"
+        if [ "$SKIP_GPU_CHECK" != "1" ]; then
+            local summary
+            summary="$(vulkaninfo --summary 2>&1)" \
+                || die "vulkaninfo failed. Check the GPU driver and WSL2 GPU passthrough."
+            echo "$summary" | grep -Eiq 'NVIDIA|AMD|Radeon|Intel' \
+                || die "no hardware Vulkan GPU was found (software llvmpipe/lavapipe is unsupported)."
+            echo "[build] Vulkan hardware device detected."
+        fi
+    fi
+}
+
+initialize_submodules()
+{
+    echo "[build] initializing pinned git submodules ..."
+    git submodule update --init --recursive
+    [ -f ncnn/CMakeLists.txt ] || die "ncnn submodule is missing."
+    if [ "$ENABLE_VULKAN" = "ON" ]; then
+        [ -f ncnn/glslang/CMakeLists.txt ] \
+            || die "ncnn/glslang is missing; run: git submodule update --init --recursive"
+    fi
+}
+
+apply_ncnn_patches()
+{
+    local patch_file
+    for patch_file in "$ROOT_DIR"/patches/*.patch; do
+        [ -f "$patch_file" ] || die "no ncnn patches found in patches/."
+        if git -C ncnn apply --check "$patch_file" >/dev/null 2>&1; then
+            git -C ncnn apply "$patch_file"
+            echo "[build] applied $(basename "$patch_file")"
+        elif git -C ncnn apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+            echo "[build] already applied $(basename "$patch_file")"
+        else
+            die "patch conflicts with pinned ncnn: $(basename "$patch_file"). Do not update the ncnn submodule independently."
+        fi
     done
-else
-    echo "[build] ncnn patches already applied, skipping."
+}
+
+check_dependencies
+initialize_submodules
+apply_ncnn_patches
+
+echo "[build] configuring $BUILD_DIR ($BUILD_TYPE, Vulkan=$ENABLE_VULKAN, tests=$BUILD_TESTS) ..."
+cmake -S . -B "$BUILD_DIR" \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DSEEDVR2_ENABLE_VULKAN="$ENABLE_VULKAN" \
+    -DSEEDVR2_BUILD_TESTS="$BUILD_TESTS"
+
+echo "[build] compiling with $JOBS job(s) ..."
+cmake --build "$BUILD_DIR" --parallel "$JOBS"
+
+if [ "$BUILD_TESTS" = "ON" ]; then
+    echo "[build] running lightweight CTest gate ..."
+    ctest --test-dir "$BUILD_DIR" --output-on-failure -L smoke
 fi
 
-# 3. CMake configure + build。
-echo "[build] configuring ($BUILD_TYPE, -j$JOBS) ..."
-cmake -S . -B build -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DSEEDVR2_ENABLE_VULKAN=ON
-echo "[build] compiling ..."
-cmake --build build -j "$JOBS"
-
-echo ""
-echo "[build] done -> build/seedvr2-ncnn-vulkan"
-echo "[build] next: ./download-models.sh && ./build/seedvr2-ncnn-vulkan -i in.mp4 -o out.mp4"
+echo
+echo "[build] done: $BUILD_DIR/seedvr2-ncnn-vulkan"
+echo "[build] next: ./download-models.sh"
+echo "[build] run:  $BUILD_DIR/seedvr2-ncnn-vulkan -i input.mp4 -o output.mp4 --resident"

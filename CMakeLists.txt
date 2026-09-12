@@ -4,6 +4,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(seedvr2_ncnn LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -68,6 +70,7 @@ if(SEEDVR2_BUILD_TESTS)
     target_include_directories(seedvr2_runtime_unit_test PRIVATE src)
     target_link_libraries(seedvr2_runtime_unit_test PRIVATE seedvr2_ncnn)
     add_test(NAME seedvr2_runtime_unit_test COMMAND seedvr2_runtime_unit_test)
+    set_tests_properties(seedvr2_runtime_unit_test PROPERTIES LABELS "smoke")
 
     add_executable(seedvr2_vae_dynamic_runner tests/vae_dynamic_runner.cpp)
     target_include_directories(seedvr2_vae_dynamic_runner PRIVATE src)
@@ -95,40 +98,48 @@ if(SEEDVR2_BUILD_TESTS)
         target_include_directories(seedvr2_shuffle_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_shuffle_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_shuffle_vulkan_runner COMMAND seedvr2_shuffle_vulkan_runner)
+        set_tests_properties(seedvr2_shuffle_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_groupnorm_vulkan_runner tests/groupnorm_vulkan_runner.cpp)
         target_include_directories(seedvr2_groupnorm_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_groupnorm_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_groupnorm_vulkan_runner COMMAND seedvr2_groupnorm_vulkan_runner)
+        set_tests_properties(seedvr2_groupnorm_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_attention_vulkan_runner tests/attention_vulkan_runner.cpp)
         target_include_directories(seedvr2_attention_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_attention_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_attention_vulkan_runner COMMAND seedvr2_attention_vulkan_runner)
+        set_tests_properties(seedvr2_attention_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_dit_input_vulkan_runner tests/dit_input_vulkan_runner.cpp)
         target_include_directories(seedvr2_dit_input_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_dit_input_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_dit_input_vulkan_runner COMMAND seedvr2_dit_input_vulkan_runner)
+        set_tests_properties(seedvr2_dit_input_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_dit_output_vulkan_runner tests/dit_output_vulkan_runner.cpp)
         target_include_directories(seedvr2_dit_output_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_dit_output_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_dit_output_vulkan_runner COMMAND seedvr2_dit_output_vulkan_runner)
+        set_tests_properties(seedvr2_dit_output_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_dit_block_vulkan_runner tests/dit_block_vulkan_runner.cpp)
         target_include_directories(seedvr2_dit_block_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_dit_block_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_dit_block_vulkan_runner COMMAND seedvr2_dit_block_vulkan_runner)
+        set_tests_properties(seedvr2_dit_block_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_conv3d_vulkan_runner tests/conv3d_vulkan_runner.cpp)
         target_link_libraries(seedvr2_conv3d_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_conv3d_vulkan_runner COMMAND seedvr2_conv3d_vulkan_runner)
+        set_tests_properties(seedvr2_conv3d_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_sampler_vulkan_runner tests/sampler_vulkan_runner.cpp)
         target_include_directories(seedvr2_sampler_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_sampler_vulkan_runner PRIVATE seedvr2_ncnn)
         add_test(NAME seedvr2_sampler_vulkan_runner COMMAND seedvr2_sampler_vulkan_runner)
+        set_tests_properties(seedvr2_sampler_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
         add_executable(seedvr2_vae_vkmat_boundary_runner tests/vae_vkmat_boundary_runner.cpp)
         target_include_directories(seedvr2_vae_vkmat_boundary_runner PRIVATE src)
@@ -138,4 +149,13 @@ if(SEEDVR2_BUILD_TESTS)
         target_include_directories(seedvr2_perf_bench PRIVATE src)
         target_link_libraries(seedvr2_perf_bench PRIVATE seedvr2_ncnn)
     endif()
+endif()
+
+install(TARGETS seedvr2_ncnn
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY include/seedvr2
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(SEEDVR2_BUILD_APPS)
+    install(TARGETS seedvr2-ncnn-vulkan
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
