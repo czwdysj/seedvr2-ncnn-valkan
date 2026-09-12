@@ -64,7 +64,13 @@ check_dependencies()
 initialize_submodules()
 {
     echo "[build] initializing pinned git submodules ..."
-    git submodule update --init --recursive
+    # 与 zimage-ncnn-vulkan 一样只获取固定提交需要的工作树；ncnn 完整历史对
+    # 国内网络代价很高。少数 Git 服务不允许浅取固定提交时再回退普通克隆。
+    if ! git submodule update --init --recursive --depth 1; then
+        echo "[build] shallow submodule checkout failed; retrying without --depth ..." >&2
+        git submodule update --init --recursive \
+            || die "failed to fetch ncnn submodules. Check access to https://github.com/Tencent/ncnn.git"
+    fi
     [ -f ncnn/CMakeLists.txt ] || die "ncnn submodule is missing."
     if [ "$ENABLE_VULKAN" = "ON" ]; then
         [ -f ncnn/glslang/CMakeLists.txt ] \
