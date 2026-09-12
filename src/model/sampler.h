@@ -1,6 +1,7 @@
 // 本文件声明 SeedVR2 使用的采样策略接口和 Euler 实现。
 // 张量保持 NCNN C,T,H,W 布局；CFG 实现正负分支融合，Euler 按 lerp schedule
-// 和 v_lerp prediction 更新 latent。该模块不加载模型，因此可独立做确定性单元测试。
+// 和 v_lerp prediction 更新 latent。CPU 路径保留数值基线，Vulkan 路径还负责
+// condition、DiT 输入拼接和 CFG reduction，使多步循环的大张量保持在 GPU。
 #pragma once
 
 #include <net.h>

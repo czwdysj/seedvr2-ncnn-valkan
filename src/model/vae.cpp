@@ -6,6 +6,11 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <vector>
+
+#if NCNN_VULKAN
+#include <gpu.h>
+#endif
 
 #include "layers/dynamic_framewise_group_norm.h"
 #include "layers/dynamic_framewise_spatial_attention.h"
@@ -50,10 +55,65 @@ int load_net(const std::filesystem::path& param,
     output = std::move(net);
     return static_cast<int>(Status::Ok);
 }
+
+#if NCNN_VULKAN
+static const char* posterior_shader = R"VKGLSL(
+#version 450
+layout(binding=0, std430) readonly buffer moments_block { sfp moments[]; };
+layout(binding=1, std430) readonly buffer noise_block { sfp noise[]; };
+layout(binding=2, std430) writeonly buffer output_block { sfp output_data[]; };
+layout(push_constant) uniform parameter {
+    uint tokens; uint cstep; uint total; uint stochastic; float scaling;
+} p;
+void main() {
+    uint i=gl_GlobalInvocationID.x; if(i>=p.total) return;
+    uint token=i/16u; uint channel=i-token*16u;
+    afp value=buffer_ld1(moments,channel*p.cstep+token);
+    if(p.stochastic!=0u) {
+        afp logvar=clamp(buffer_ld1(moments,(channel+16u)*p.cstep+token),-30.0,20.0);
+        value += exp(0.5*logvar)*buffer_ld1(noise,i);
+    }
+    buffer_st1(output_data,i,value*p.scaling);
+}
+)VKGLSL";
+
+static const char* decode_layout_shader = R"VKGLSL(
+#version 450
+layout(binding=0, std430) readonly buffer latent_block { sfp latent[]; };
+layout(binding=1, std430) writeonly buffer output_block { sfp output_data[]; };
+layout(push_constant) uniform parameter { uint tokens; uint cstep; uint total; float inverse_scaling; } p;
+void main() {
+    uint i=gl_GlobalInvocationID.x; if(i>=p.total) return;
+    uint channel=i/p.tokens; uint token=i-channel*p.tokens;
+    buffer_st1(output_data,channel*p.cstep+token,
+               buffer_ld1(latent,token*16u+channel)*p.inverse_scaling);
+}
+)VKGLSL";
+
+int compile_vae_pipeline(const ncnn::VulkanDevice* device,
+                         const ncnn::Option& option,
+                         const char* source,
+                         ncnn::Pipeline*& pipeline)
+{
+    std::vector<uint32_t> spirv;
+    const int result=ncnn::compile_spirv_module(source,option,spirv);
+    if(result!=0) return result;
+    pipeline=new ncnn::Pipeline(device);
+    pipeline->set_optimal_local_size_xyz(256,1,1);
+    const std::vector<ncnn::vk_specialization_type> specializations;
+    return pipeline->create(spirv.data(),spirv.size()*sizeof(uint32_t),specializations);
+}
+#endif
 } // namespace
 
 SeedVR2VAE::SeedVR2VAE() = default;
-SeedVR2VAE::~SeedVR2VAE() = default;
+SeedVR2VAE::~SeedVR2VAE()
+{
+#if NCNN_VULKAN
+    delete pipeline_posterior_;
+    delete pipeline_decode_layout_;
+#endif
+}
 
 int SeedVR2VAE::load(const std::string& model_dir, const RuntimeContext& context)
 {
@@ -75,6 +135,22 @@ int SeedVR2VAE::load(const std::string& model_dir, const RuntimeContext& context
         encoder_.reset();
         return decoder_result;
     }
+#if NCNN_VULKAN
+    if (context.options().device == DeviceType::Vulkan)
+    {
+        const ncnn::VulkanDevice* device =
+            ncnn::get_gpu_device(context.options().vulkan_device_index);
+        if (!device
+            || compile_vae_pipeline(device, context.ncnn_option(), posterior_shader,
+                                    pipeline_posterior_) != 0
+            || compile_vae_pipeline(device, context.ncnn_option(), decode_layout_shader,
+                                    pipeline_decode_layout_) != 0)
+        {
+            last_error_ = "failed to compile VAE boundary Vulkan pipelines";
+            return static_cast<int>(Status::ModelLoadFailed);
+        }
+    }
+#endif
     last_error_.clear();
     return static_cast<int>(Status::Ok);
 }
@@ -179,4 +255,102 @@ int SeedVR2VAE::decode(const ncnn::Mat& latent, float scaling_factor, ncnn::Mat&
     }
     return static_cast<int>(Status::Ok);
 }
+
+#if NCNN_VULKAN
+int SeedVR2VAE::encode_vkmat(const ncnn::VkMat& video,
+                             const ncnn::VkMat& posterior_noise,
+                             bool stochastic,
+                             float scaling_factor,
+                             VulkanExecutionContext& execution,
+                             ncnn::VkMat& latent)
+{
+    if (!encoder_ || !pipeline_posterior_)
+    {
+        last_error_="VAE Vulkan encoder is not loaded";
+        return static_cast<int>(Status::NotLoaded);
+    }
+    if(video.dims!=4 || video.c*video.elempack!=3 || posterior_noise.dims!=2
+        || posterior_noise.w!=16 || posterior_noise.elempack!=1)
+    {
+        last_error_="VAE Vulkan encoder expects video C=3,T,H,W and pack1 posterior noise";
+        return static_cast<int>(Status::InvalidArgument);
+    }
+
+    ncnn::VkCompute command(execution.device());
+    ncnn::Extractor extractor=encoder_->create_extractor();
+    execution.configure(extractor);
+    ncnn::VkMat moments_packed;
+    if(extractor.input(encoder_->input_names()[0],video)!=0
+        || extractor.extract(encoder_->output_names()[0],moments_packed,command)!=0)
+    {
+        last_error_="VAE Vulkan encoder inference failed";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+    ncnn::VkMat moments;
+    execution.device()->convert_packing(moments_packed,moments,1,command,execution.option());
+    const int tokens=posterior_noise.h;
+    latent.create(16,tokens,posterior_noise.elemsize,1,execution.blob_allocator());
+    if(latent.empty()) return static_cast<int>(Status::OutOfMemory);
+    const uint32_t total=static_cast<uint32_t>(tokens*16);
+    std::vector<ncnn::VkMat> bindings={moments,posterior_noise,latent};
+    std::vector<ncnn::vk_constant_type> constants(5);
+    constants[0].u32=tokens; constants[1].u32=static_cast<uint32_t>(moments.cstep);
+    constants[2].u32=total; constants[3].u32=stochastic?1u:0u; constants[4].f=scaling_factor;
+    ncnn::VkMat dispatcher; dispatcher.w=total; dispatcher.h=1; dispatcher.c=1;
+    command.record_pipeline(pipeline_posterior_,bindings,constants,dispatcher);
+    if(command.submit_and_wait()!=0)
+    {
+        last_error_="VAE Vulkan posterior dispatch failed";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+    last_error_.clear();
+    return static_cast<int>(Status::Ok);
+}
+
+int SeedVR2VAE::decode_vkmat(const ncnn::VkMat& latent,
+                             int frames,
+                             int height,
+                             int width,
+                             float scaling_factor,
+                             VulkanExecutionContext& execution,
+                             ncnn::VkMat& video)
+{
+    if(!decoder_ || !pipeline_decode_layout_)
+    {
+        last_error_="VAE Vulkan decoder is not loaded";
+        return static_cast<int>(Status::NotLoaded);
+    }
+    const int tokens=frames*height*width;
+    if(latent.dims!=2 || latent.w!=16 || latent.h!=tokens || latent.elempack!=1
+        || scaling_factor<=0.0f)
+    {
+        last_error_="VAE Vulkan decoder expects pack1 token-major [T*H*W,16] latent";
+        return static_cast<int>(Status::InvalidArgument);
+    }
+
+    ncnn::VkCompute command(execution.device());
+    ncnn::VkMat unscaled;
+    unscaled.create(width,height,frames,16,latent.elemsize,1,execution.blob_allocator());
+    if(unscaled.empty()) return static_cast<int>(Status::OutOfMemory);
+    const uint32_t total=static_cast<uint32_t>(tokens*16);
+    std::vector<ncnn::VkMat> bindings={latent,unscaled};
+    std::vector<ncnn::vk_constant_type> constants(4);
+    constants[0].u32=tokens; constants[1].u32=static_cast<uint32_t>(unscaled.cstep);
+    constants[2].u32=total; constants[3].f=1.0f/scaling_factor;
+    ncnn::VkMat dispatcher; dispatcher.w=total; dispatcher.h=1; dispatcher.c=1;
+    command.record_pipeline(pipeline_decode_layout_,bindings,constants,dispatcher);
+
+    ncnn::Extractor extractor=decoder_->create_extractor();
+    execution.configure(extractor);
+    if(extractor.input(decoder_->input_names()[0],unscaled)!=0
+        || extractor.extract(decoder_->output_names()[0],video,command)!=0
+        || command.submit_and_wait()!=0)
+    {
+        last_error_="VAE Vulkan decoder inference failed";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+    last_error_.clear();
+    return static_cast<int>(Status::Ok);
+}
+#endif
 } // namespace seedvr2

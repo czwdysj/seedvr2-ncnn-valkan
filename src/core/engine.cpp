@@ -1,6 +1,6 @@
-// 本文件实现 SeedVR2Engine Facade，把预处理、VAE、条件构造、流式 DiT、
-// CFG/Euler 和后处理编排成一次 process 调用。模块只通过明确的 Mat 契约连接，
-// 对外不泄露 NCNN；任何阶段失败都会保留带阶段上下文的 last_error。
+// 本文件实现 SeedVR2Engine Facade，把预处理、VAE、条件构造、DiT、CFG/Euler
+// 和后处理编排成一次 process 调用。CPU 路径以 Mat 连接；Vulkan 路径在一次
+// process 内共享 allocator，大型中间张量始终使用 VkMat，对外仍不泄露 NCNN。
 #include "seedvr2/engine.h"
 
 #include <algorithm>
@@ -52,9 +52,13 @@ ncnn::Mat make_text_mat(const TextEmbedding& embedding)
     return result;
 }
 
-ncnn::Mat make_random_latent(const ncnn::Mat& shape, std::mt19937_64& random)
+ncnn::Mat make_random_latent(int width,
+                             int height,
+                             int frames,
+                             int channels,
+                             std::mt19937_64& random)
 {
-    ncnn::Mat result(shape.w, shape.h, shape.d, shape.c, 4u, 1);
+    ncnn::Mat result(width, height, frames, channels, 4u, 1);
     std::normal_distribution<float> normal(0.0f, 1.0f);
     for (int channel = 0; channel < result.c; ++channel)
         for (int frame = 0; frame < result.d; ++frame)
@@ -65,6 +69,11 @@ ncnn::Mat make_random_latent(const ncnn::Mat& shape, std::mt19937_64& random)
                     row[x] = normal(random);
             }
     return result;
+}
+
+ncnn::Mat make_random_latent(const ncnn::Mat& shape, std::mt19937_64& random)
+{
+    return make_random_latent(shape.w, shape.h, shape.d, shape.c, random);
 }
 
 float transformed_condition_timestep(float noise_scale, const ncnn::Mat& latent)
@@ -78,6 +87,19 @@ float transformed_condition_timestep(float noise_scale, const ncnn::Mat& latent)
     const float x1 = 256.0f * 256.0f * 37.0f;
     const float x2 = 1280.0f * 720.0f * 145.0f;
     const float shift = 1.0f + (height * width * frames - x1) * (5.0f - 1.0f) / (x2 - x1);
+    const float normalized = timestep / 1000.0f;
+    return 1000.0f * shift * normalized / (1.0f + (shift - 1.0f) * normalized);
+}
+
+float transformed_condition_timestep(float noise_scale, int frames, int height, int width)
+{
+    const float timestep = noise_scale * 1000.0f;
+    if (timestep == 0.0f)
+        return 0.0f;
+    const float x1 = 256.0f * 256.0f * 37.0f;
+    const float x2 = 1280.0f * 720.0f * 145.0f;
+    const float shift = 1.0f
+        + (static_cast<float>(height * width * frames) - x1) * 4.0f / (x2 - x1);
     const float normalized = timestep / 1000.0f;
     return 1000.0f * shift * normalized / (1.0f + (shift - 1.0f) * normalized);
 }
@@ -137,18 +159,6 @@ ncnn::Mat flatten_cthw(const ncnn::Mat& value)
             for (int x = 0; x < value.w; ++x, ++token)
                 for (int channel = 0; channel < value.c; ++channel)
                     result.row(token)[channel] = value.channel(channel).depth(frame).row(y)[x];
-    return result;
-}
-
-ncnn::Mat unflatten_cthw(const ncnn::Mat& value, int frames, int height, int width)
-{
-    ncnn::Mat result(width, height, frames, value.w, 4u, 1);
-    int token = 0;
-    for (int frame = 0; frame < frames; ++frame)
-        for (int y = 0; y < height; ++y)
-            for (int x = 0; x < width; ++x, ++token)
-                for (int channel = 0; channel < value.w; ++channel)
-                    result.channel(channel).depth(frame).row(y)[x] = value.row(token)[channel];
     return result;
 }
 
@@ -379,51 +389,59 @@ public:
             return result;
         const auto t_preprocessed = std::chrono::steady_clock::now();
 
-        // 本阶段 VAE 仍保留 Mat 边界；VAE 输出后，所有 diffusion 大张量直到
-        // decoder 输入前均驻留共享 allocator 的 VkMat，不再按采样步往返 CPU。
+        // VAE 的降采样倍率为 T:4、H/W:8；首帧因 causal 结构单独保留。
+        const int frames = (prepared.tensor.d - 1) / 4 + 1;
+        const int height = prepared.tensor.h / 8;
+        const int width = prepared.tensor.w / 8;
         std::mt19937_64 random(options.seed);
-        ncnn::Mat encoded;
-        result = vae.encode(prepared.tensor,
-                            random,
-                            options.stochastic_vae,
-                            options.vae_scaling_factor,
-                            encoded);
-        if (result != 0)
-            return fail(static_cast<Status>(result), "VAE encode failed: " + vae.last_error());
-        const auto t_encoded = std::chrono::steady_clock::now();
-
-        ncnn::Mat latent_cpu = make_random_latent(encoded, random);
-        ncnn::Mat augment_cpu = make_random_latent(encoded, random);
+        // 随机数生成顺序与 CPU 基线严格一致：posterior、initial、augment。
+        ncnn::Mat posterior_cpu = make_random_latent(width, height, frames, 16, random);
+        ncnn::Mat latent_cpu = make_random_latent(width, height, frames, 16, random);
+        ncnn::Mat augment_cpu = make_random_latent(width, height, frames, 16, random);
+        ncnn::Mat posterior_flat = flatten_cthw(posterior_cpu);
         ncnn::Mat latent_flat = flatten_cthw(latent_cpu);
-        ncnn::Mat encoded_flat = flatten_cthw(encoded);
         ncnn::Mat augment_flat = flatten_cthw(augment_cpu);
         ncnn::Mat positive_text = make_text_mat(positive);
         ncnn::Mat negative_text = options.cfg_scale == 1.0f ? ncnn::Mat() : make_text_mat(negative);
-        if (latent_flat.empty() || encoded_flat.empty() || augment_flat.empty()
+        if (posterior_flat.empty() || latent_flat.empty() || augment_flat.empty()
             || positive_text.empty() || (options.cfg_scale != 1.0f && negative_text.empty()))
-            return fail(Status::OutOfMemory, "failed to allocate Vulkan sampler inputs");
+            return fail(Status::OutOfMemory, "failed to allocate Vulkan Engine inputs");
 
         VulkanExecutionContext execution(context);
         if (!execution.valid())
             return fail(Status::OutOfMemory, "failed to acquire Engine Vulkan allocators");
 
+        ncnn::VkMat video_gpu;
+        ncnn::VkMat posterior_packed, posterior_gpu;
         ncnn::VkMat latent_packed, latent;
-        ncnn::VkMat encoded_packed, encoded_gpu;
         ncnn::VkMat augment_packed, augment_gpu;
         ncnn::VkMat positive_packed, positive_gpu;
         ncnn::VkMat negative_packed, negative_gpu;
         ncnn::VkCompute upload(execution.device());
+        upload.record_upload(prepared.tensor, video_gpu, execution.option());
+        record_upload_pack1(posterior_flat, execution, upload, posterior_packed, posterior_gpu);
         record_upload_pack1(latent_flat, execution, upload, latent_packed, latent);
-        record_upload_pack1(encoded_flat, execution, upload, encoded_packed, encoded_gpu);
         record_upload_pack1(augment_flat, execution, upload, augment_packed, augment_gpu);
         record_upload_pack1(positive_text, execution, upload, positive_packed, positive_gpu);
         if (options.cfg_scale != 1.0f)
             record_upload_pack1(negative_text, execution, upload, negative_packed, negative_gpu);
         if (upload.submit_and_wait() != 0)
-            return fail(Status::InferenceFailed, "failed to upload Vulkan sampler inputs");
+            return fail(Status::InferenceFailed, "failed to upload Vulkan Engine inputs");
+
+        ncnn::VkMat encoded_gpu;
+        result = vae.encode_vkmat(video_gpu,
+                                  posterior_gpu,
+                                  options.stochastic_vae,
+                                  options.vae_scaling_factor,
+                                  execution,
+                                  encoded_gpu);
+        if (result != 0)
+            return fail(static_cast<Status>(result), "VAE Vulkan encode failed: " + vae.last_error());
+        const auto t_encoded = std::chrono::steady_clock::now();
 
         const float condition_ratio =
-            transformed_condition_timestep(options.condition_noise_scale, encoded) / 1000.0f;
+            transformed_condition_timestep(options.condition_noise_scale, frames, height, width)
+            / 1000.0f;
         ncnn::VkMat condition;
         ncnn::VkCompute condition_command(execution.device());
         result = sampler->make_condition_vulkan(encoded_gpu,
@@ -437,9 +455,6 @@ public:
             return result != 0 ? result : fail(Status::InferenceFailed,
                                                 "Vulkan condition dispatch failed");
 
-        const int frames = encoded.d;
-        const int height = encoded.h;
-        const int width = encoded.w;
         const std::vector<float>& timesteps = sampler->timesteps();
         for (std::size_t index = 0; index < timesteps.size(); ++index)
         {
@@ -526,16 +541,23 @@ public:
         }
         const auto t_dit = std::chrono::steady_clock::now();
 
-        ncnn::Mat latent_result_flat;
-        ncnn::VkCompute download(execution.device());
-        download.record_download(latent, latent_result_flat, execution.option());
-        if (download.submit_and_wait() != 0)
-            return fail(Status::InferenceFailed, "failed to download final Vulkan latent");
-        ncnn::Mat latent_result = unflatten_cthw(latent_result_flat, frames, height, width);
-        ncnn::Mat decoded;
-        result = vae.decode(latent_result, options.vae_scaling_factor, decoded);
+        ncnn::VkMat decoded_gpu;
+        result = vae.decode_vkmat(latent,
+                                  frames,
+                                  height,
+                                  width,
+                                  options.vae_scaling_factor,
+                                  execution,
+                                  decoded_gpu);
         if (result != 0)
-            return fail(static_cast<Status>(result), "VAE decode failed: " + vae.last_error());
+            return fail(static_cast<Status>(result), "VAE Vulkan decode failed: " + vae.last_error());
+
+        // 这是整个 Engine Vulkan 数据流唯一的 feature tensor 下载。
+        ncnn::Mat decoded;
+        ncnn::VkCompute download(execution.device());
+        download.record_download(decoded_gpu, decoded, execution.option());
+        if (download.submit_and_wait() != 0)
+            return fail(Status::InferenceFailed, "failed to download final Vulkan video");
         const auto t_decoded = std::chrono::steady_clock::now();
         result = postprocess_video(decoded, prepared, output, error);
 
@@ -547,7 +569,8 @@ public:
             };
             std::fprintf(stderr,
                          "[PROFILE Vulkan resident tensors] preprocess %.1f ms | vae_encode %.1f ms | "
-                         "dit_%zu_steps %.1f ms | vae_decode %.1f ms | postprocess %.1f ms | total %.1f ms\n",
+                         "dit_%zu_steps %.1f ms | vae_decode %.1f ms | postprocess %.1f ms | total %.1f ms "
+                         "| large_upload_batches=1 intermediate_downloads=0 final_downloads=1\n",
                          ms(t_start, t_preprocessed),
                          ms(t_preprocessed, t_encoded),
                          timesteps.size(),
