@@ -44,6 +44,12 @@ lightning_logs/
 *.vsix
 *.mp4
 
+# README 中的真实端到端演示素材需要随仓库发布。
+!/docs/assets/
+!/docs/assets/*.mp4
+!/docs/assets/*.gif
+!/docs/assets/*.png
+
 # ---- Assembled model directory (created by download-models.sh) ----
 /models/
 /embeddings/out/

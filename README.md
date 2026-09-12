@@ -4,6 +4,8 @@
 NCNN + Vulkan 推理实现。运行时是纯 C++，不需要 Python、PyTorch 或 CUDA Toolkit；
 命令行程序负责视频解码、模型推理、视频编码和音频保留。
 
+> 本项目只发布和支持 **Linux/WSL2 x86_64** 构建，不提供 Windows 原生构建。
+
 > 当前可用范围：短视频整段推理已经在 Ubuntu 22.04/24.04、WSL2 和 NVIDIA RTX 5090
 > 上完成真实 MP4 闭环验证。AMD/Intel Vulkan 尚未验证；长视频时间分块尚未实现，
 > 当前版本会把整段视频解码到内存，请先使用短片段。
@@ -24,6 +26,22 @@ cd seedvr2-ncnn-valkan
 显存不足时去掉该参数，程序会逐块加载 DiT，显存更低但速度明显更慢。
 
 权重仓库：[vvzc/seedvr2-ncnn-models](https://huggingface.co/vvzc/seedvr2-ncnn-models)
+
+## 真实视频效果
+
+下面是同一段 5 帧视频的输入与 NCNN Vulkan 输出。动画中的输入画面按照实际预处理
+规则从 480x270 中心裁剪为 480x256，因此左右两侧具有完全相同的视野。
+
+![Big Buck Bunny 输入与 SeedVR2 NCNN Vulkan 输出对比](docs/assets/seedvr2_demo_comparison.gif)
+
+| 原始输入 | NCNN Vulkan 输出 |
+|---|---|
+| [下载 480x270 输入 MP4](docs/assets/seedvr2_demo_input.mp4) | [下载 480x256 输出 MP4](docs/assets/seedvr2_demo_output.mp4) |
+
+运行条件：RTX 5090、Vulkan resident、1 step、5 帧、25 FPS；模型推理代码基于
+`v0.1.1`（`e198470`）。端到端模型阶段耗时 11.526 秒，运行时记录为一次集中上传、
+零次中间下载和一次最终下载。演示素材截取自 *Big Buck Bunny*，版权归 Blender
+Foundation，按 [CC BY 3.0](https://peach.blender.org/about/) 使用。
 
 ## 已实现的数据流
 
