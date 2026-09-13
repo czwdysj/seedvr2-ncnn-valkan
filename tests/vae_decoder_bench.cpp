@@ -38,16 +38,17 @@ void register_vae_layers(ncnn::Net& net)
 
 int main(int argc, char** argv)
 {
-    if (argc != 6)
+    if (argc != 6 && argc != 7)
     {
-        std::fprintf(stderr, "usage: %s decoder.param decoder.bin T H W\n", argv[0]);
+        std::fprintf(stderr, "usage: %s model.param model.bin T H W [C=16]\n", argv[0]);
         return 2;
     }
 
     const int frames = std::atoi(argv[3]);
     const int height = std::atoi(argv[4]);
     const int width = std::atoi(argv[5]);
-    if (frames <= 0 || height <= 0 || width <= 0)
+    const int channels = argc == 7 ? std::atoi(argv[6]) : 16;
+    if (frames <= 0 || height <= 0 || width <= 0 || channels <= 0)
         return 3;
 
     ncnn::create_gpu_instance();
@@ -71,7 +72,7 @@ int main(int argc, char** argv)
         return 5;
     }
 
-    ncnn::Mat input(width, height, frames, 16, 4u, 1);
+    ncnn::Mat input(width, height, frames, channels, 4u, 1);
     size_t logical_index = 0;
     for (int channel = 0; channel < input.c; ++channel)
         for (int frame = 0; frame < input.d; ++frame)
@@ -109,9 +110,9 @@ int main(int argc, char** argv)
                 for (int x = 0; x < output.w; ++x)
                     checksum += row[x];
             }
-    std::printf("latent C,T,H,W=16,%d,%d,%d output C,T,H,W=%d,%d,%d,%d\n",
-                frames, height, width, output.c, output.d, output.h, output.w);
-    std::printf("decoder median_ms=%.3f samples=5 checksum=%.9g\n",
+    std::printf("input C,T,H,W=%d,%d,%d,%d output C,T,H,W=%d,%d,%d,%d\n",
+                channels, frames, height, width, output.c, output.d, output.h, output.w);
+    std::printf("vae_graph median_ms=%.3f samples=5 checksum=%.9g\n",
                 samples[samples.size() / 2], checksum);
 
     // Net 持有 Vulkan pipeline，必须在销毁全局 GPU instance 前显式释放。

@@ -174,7 +174,7 @@ index 00000000..e551578c
 +    }
 +
 +    pipeline_convolution3d = new Pipeline(vkdev);
-+    pipeline_convolution3d->set_optimal_local_size_xyz(64, 1, 1);
++    pipeline_convolution3d->set_optimal_local_size_xyz(128, 1, 1);
 +    pipeline_convolution3d->create(spirv.data(), spirv.size() * sizeof(uint32_t), std::vector<vk_specialization_type>());
 +
 +    return 0;

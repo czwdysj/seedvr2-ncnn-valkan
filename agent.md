@@ -29,6 +29,14 @@ This file defines the coding rules that the agent must read and follow before ma
 - If a full test is too expensive, run the strongest practical smaller test and clearly state what was and was not verified.
 - Do not report work as finished until the relevant test passes.
 
+## Performance Optimization Documentation
+
+- 每一次性能优化都必须在 `docs/v2.0开发优化/` 中新增或更新中文文档，源码仍放在其原有职责目录。
+- 文档必须按执行顺序说明基线、瓶颈证据、数据布局、修改步骤、验证方法和后续限制。
+- 文档必须包含优化前后的核心代码对比，并解释指令数量、显存访问、同步、临时内存或计算量为何发生变化。
+- 性能报告必须记录硬件、驱动、精度、输入尺寸、预热次数、正式次数、统计方法和原始结果；不得只报告加速比。
+- 只有数值测试和同条件 A/B 性能测试都通过后，才能提交该项优化。
+
 ## Comments
 
 - Important code must include clear, concise comments explaining why the code exists, what tensor/model behavior it implements, and why a non-obvious implementation choice is necessary.

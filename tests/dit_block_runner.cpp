@@ -10,6 +10,7 @@
 #include <net.h>
 
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -152,13 +153,17 @@ int main(int argc, char** argv)
     }
     ncnn::Mat vid_output;
     ncnn::Mat txt_output;
+    const auto inference_start = std::chrono::steady_clock::now();
     const int vid_result = extractor.extract("vid_out", vid_output);
     const int txt_result = extractor.extract("txt_out", txt_output);
+    const double inference_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - inference_start).count();
     if (vid_result != 0 || txt_result != 0)
     {
         std::fprintf(stderr, "block inference failed (vid=%d txt=%d)\n", vid_result, txt_result);
         return 6;
     }
+    std::printf("block_forward_ms=%.3f\n", inference_ms);
     if (!write_matrix(argv[11], vid_output) || !write_matrix(argv[12], txt_output))
     {
         std::fprintf(stderr, "failed to write block outputs\n");
