@@ -1,9 +1,9 @@
 diff --git a/src/layer/vulkan/convolution3d_vulkan.cpp b/src/layer/vulkan/convolution3d_vulkan.cpp
 new file mode 100644
-index 00000000..5f079839
+index 00000000..e551578c
 --- /dev/null
 +++ b/src/layer/vulkan/convolution3d_vulkan.cpp
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,315 @@
 +// Copyright 2021 Tencent
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -37,7 +37,7 @@ index 00000000..5f079839
 +
 +layout(binding = 0, std430) readonly buffer bottom_data { sfp bottom_blob[]; };
 +layout(binding = 1, std430) writeonly buffer top_data { sfp top_blob[]; };
-+layout(binding = 2, std430) readonly buffer weight_data { sfp weight_blob[]; };
++layout(binding = 2, std430) readonly buffer weight_data { sfpvec4 weight_blob[]; };
 +layout(binding = 3, std430) readonly buffer bias_data { sfp bias_blob[]; };
 +
 +layout(push_constant) uniform parameter {
@@ -120,12 +120,11 @@ index 00000000..5f079839
 +
 +                    uint kernel_offset = q * p.maxk
 +                        + (kd * p.kernel_h * p.kernel_w + kh * p.kernel_w + kw);
-+                    uint output_stride = p.channels * p.maxk;
-+                    afpvec4 wt = afpvec4(0.0);
-+                    if (p_out_base + 0u < p.num_output) wt.x = buffer_ld1(weight_blob, (p_out_base + 0u) * output_stride + kernel_offset);
-+                    if (p_out_base + 1u < p.num_output) wt.y = buffer_ld1(weight_blob, (p_out_base + 1u) * output_stride + kernel_offset);
-+                    if (p_out_base + 2u < p.num_output) wt.z = buffer_ld1(weight_blob, (p_out_base + 2u) * output_stride + kernel_offset);
-+                    if (p_out_base + 3u < p.num_output) wt.w = buffer_ld1(weight_blob, (p_out_base + 3u) * output_stride + kernel_offset);
++                    // 权重在上传前转换为 [out/4, in, kernel, 4]，一次向量读取
++                    // 取回四个输出通道，避免四条离散全局显存 load。
++                    uint output_group = p_out_base / 4u;
++                    uint packed_widx = output_group * (p.channels * p.maxk) + kernel_offset;
++                    afpvec4 wt = buffer_ld4(weight_blob, packed_widx);
 +                    sum += v * wt;
 +                }
 +            }
@@ -190,7 +189,34 @@ index 00000000..5f079839
 +
 +int Convolution3D_vulkan::upload_model(VkTransfer& cmd, const Option& opt)
 +{
-+    cmd.record_upload(weight_data, weight_data_gpu, opt);
++    const int maxk = kernel_w * kernel_h * kernel_d;
++    const int channels = weight_data_size / num_output / maxk;
++    const int output_groups = (num_output + 3) / 4;
++
++    // 原始权重为 [out, in, kernel]。将四个输出通道放进连续 vec4，shader
++    // 可用一次 buffer_ld4 完成原先四次互不连续的标量读取。
++    Mat weight_data_pack4(maxk * channels * output_groups, static_cast<size_t>(16u), 4,
++                          static_cast<Allocator*>(0));
++    if (weight_data_pack4.empty())
++        return -100;
++    const float* source = weight_data;
++    float* destination = weight_data_pack4;
++    for (int output_group = 0; output_group < output_groups; ++output_group)
++        for (int input_channel = 0; input_channel < channels; ++input_channel)
++            for (int kernel_index = 0; kernel_index < maxk; ++kernel_index)
++            {
++                const int packed_index =
++                    (output_group * channels * maxk + input_channel * maxk + kernel_index) * 4;
++                for (int lane = 0; lane < 4; ++lane)
++                {
++                    const int output_channel = output_group * 4 + lane;
++                    destination[packed_index + lane] = output_channel < num_output
++                        ? source[output_channel * channels * maxk
++                                 + input_channel * maxk + kernel_index]
++                        : 0.f;
++                }
++            }
++    cmd.record_upload(weight_data_pack4, weight_data_gpu, opt);
 +    if (bias_term)
 +        cmd.record_upload(bias_data, bias_data_gpu, opt);
 +    return 0;
@@ -295,10 +321,10 @@ index 00000000..5f079839
 +} // namespace ncnn
 diff --git a/src/layer/vulkan/convolution3d_vulkan.h b/src/layer/vulkan/convolution3d_vulkan.h
 new file mode 100644
-index 00000000..2af4488c
+index 00000000..a63d3e83
 --- /dev/null
 +++ b/src/layer/vulkan/convolution3d_vulkan.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +// Copyright 2021 Tencent
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -312,7 +338,8 @@ index 00000000..2af4488c
 +// Convolution3D 的 Vulkan 后端：pack1 张量布局、四输出通道直接卷积
 +// （不 im2col/winograd），
 +// 支持显式 pad 与 SAME pad（-233/-234 在 forward 中折算为显式 pad 量）。
-+// 每个 work item 在同一空间位置累加至多四个输出通道，从而复用输入读取。
++// 每个 work item 在同一空间位置累加至多四个输出通道，从而复用输入读取；权重
++// 预打包为 [out/4,in,kernel,4]，使四个输出权重可由一次向量 load 读入。
 +class Convolution3D_vulkan : public Convolution3D
 +{
 +public:
