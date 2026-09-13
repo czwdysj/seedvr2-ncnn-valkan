@@ -134,6 +134,7 @@ target_link_libraries(your_app PRIVATE SeedVR2::seedvr2_ncnn)
 
 ## 文档
 
+- [项目技术 Discussion：架构、难点、正确性与性能](docs/SeedVR2-NCNN-Vulkan技术Discussion.md)
 - [项目结构与长视频开发接手指南](docs/SeedVR2长视频开发接手指南.md)
 - [PyTorch 到 NCNN 转换报告](docs/seedvr2_pytorch_to_ncnn_conversion_report_zh.md)
 - [自定义层总览](docs/custom_layers/overview_zh.md)

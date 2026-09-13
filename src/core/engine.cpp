@@ -546,6 +546,10 @@ namespace seedvr2
                 return fail(static_cast<Status>(result), "VAE Vulkan decode failed: " + vae.last_error());
 
             // 这是整个 Engine Vulkan 数据流唯一的 feature tensor 下载。
+            // ncnn 的 record_download 不检查空 VkMat，因此在 API 边界先验证输出契约。
+            if (decoded_gpu.empty() || decoded_gpu.data == nullptr || decoded_gpu.dims != 4
+                || decoded_gpu.c * decoded_gpu.elempack != 3)
+                return fail(Status::InferenceFailed, "VAE Vulkan decode returned an invalid video tensor");
             ncnn::Mat decoded;
             ncnn::VkCompute download(execution.device());
             download.record_download(decoded_gpu, decoded, execution.option());

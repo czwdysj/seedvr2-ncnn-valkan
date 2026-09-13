@@ -343,10 +343,22 @@ int SeedVR2VAE::decode_vkmat(const ncnn::VkMat& latent,
     ncnn::Extractor extractor=decoder_->create_extractor();
     execution.configure(extractor);
     if(extractor.input(decoder_->input_names()[0],unscaled)!=0
-        || extractor.extract(decoder_->output_names()[0],video,command)!=0
-        || command.submit_and_wait()!=0)
+        || extractor.extract(decoder_->output_names()[0],video,command)!=0)
     {
         last_error_="VAE Vulkan decoder inference failed";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+
+    // VkMat 提取要求整张 decoder 图均有 Vulkan 实现；若 ncnn 补丁未应用，
+    // 最后的 Convolution3D 会回退到 CPU，此处必须明确报错而不是让下载阶段崩溃。
+    if(video.empty() || video.data==nullptr)
+    {
+        last_error_="VAE Vulkan decoder returned no GPU output; verify the ncnn Convolution3D Vulkan patch";
+        return static_cast<int>(Status::InferenceFailed);
+    }
+    if(command.submit_and_wait()!=0)
+    {
+        last_error_="VAE Vulkan decoder dispatch failed";
         return static_cast<int>(Status::InferenceFailed);
     }
     last_error_.clear();
