@@ -138,14 +138,6 @@ target_link_libraries(your_app PRIVATE SeedVR2::seedvr2_ncnn)
 
 公开 C++ API 位于 [`include/seedvr2/engine.h`](include/seedvr2/engine.h)。
 
-## 文档
-
-- [项目技术 Discussion：架构、难点、正确性与性能](docs/SeedVR2-NCNN-Vulkan技术Discussion.md)
-- [项目结构与长视频开发接手指南](docs/SeedVR2长视频开发接手指南.md)
-- [PyTorch 到 NCNN 转换报告](docs/seedvr2_pytorch_to_ncnn_conversion_report_zh.md)
-- [自定义层总览](docs/custom_layers/overview_zh.md)
-- [Attention 精度验证](docs/attention_accuracy_validation_5090_zh.md)
-- [VAE 3D 卷积优化](docs/v2.0开发优化/VAE_3D卷积优化详解.md)
 
 ## 许可
 
