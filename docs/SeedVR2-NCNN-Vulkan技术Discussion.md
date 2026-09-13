@@ -4,6 +4,8 @@
 **不能只依赖 pnnx 自动转换、当前实现的关键设计、RTX 5090 实测结果，以及距离高性能**
 **长视频推理还缺少哪些工作。文中性能数据来自真实完整程序**，
 
+项目链接：[[czwdysj/seedvr2-ncnn-valkan: 腾讯犀牛鸟开源人才计划2026年ncnn项目课题-port seedvr2 to ncnn 目标：形成像 zimage-ncnn-vulkan 类似的项目，需要自定义 adaptive window attention模块导出和实现，vulkan加速](https://github.com/czwdysj/seedvr2-ncnn-valkan)](https://github.com/czwdysj/seedvr2-ncnn-valkan)
+
 
 
 ## 1. 项目结论
@@ -190,12 +192,6 @@ manifest、数量和 SHA256 也全部通过。
 - GPU 显存：`19538 MiB`；
 - 宿主最大 RSS：约 `2.0 GiB`；
 - 纯模型吞吐：约 `0.86 frame/s`；
-- 两次输出 MP4 的 SHA256 完全相同：
-  `8f017444ec44c5605b0b7eba08eec1b6ab7081ba4491ddbdf8f4837fae128ae0`。
-
-本次视频输出与仓库中的
-[`docs/assets/seedvr2_demo_output.mp4`](assets/seedvr2_demo_output.mp4) 字节一致，输入与
-可视化对比位于 README 的“效果”章节。
 
 ### 5.3 性能解读
 
@@ -281,28 +277,4 @@ Convolution3D 补丁、固定 ncnn/glslang 提交、Vulkan loader 与 NVIDIA ICD
 5. **冷启动：** 增加 Vulkan pipeline cache、权重 mmap/缓存和可复用长驻进程模式。
 6. **发布矩阵：** 在 Ubuntu 22.04/24.04 和 WSL2 做干净 clone 的自动构建，并增加完整
    模型的发布前 GPU 门禁。
-
-## 10. 复现本次实例
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake git curl libvulkan-dev vulkan-tools ffmpeg
-
-git clone --recursive https://github.com/czwdysj/seedvr2-ncnn-valkan.git
-cd seedvr2-ncnn-valkan
-BUILD_DIR=build-release JOBS=16 ./build.sh
-./download-models.sh
-
-SEEDVR2_PROFILE=1 ./build-release/seedvr2-ncnn-vulkan \
-  -i docs/assets/seedvr2_demo_input.mp4 \
-  -o output.mp4 --models models --resident
-```
-
-`build.sh` 是正式入口，因为它负责应用 ncnn 补丁并运行轻量测试。构建完成后可使用：
-
-```bash
-./download-models.sh --verify-only
-ctest --test-dir build-release --output-on-failure -L smoke
-ffprobe -v error -show_streams output.mp4
-```
 
