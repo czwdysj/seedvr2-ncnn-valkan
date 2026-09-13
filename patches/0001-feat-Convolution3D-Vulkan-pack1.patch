@@ -1,41 +1,9 @@
-From 68f5696bafaf72f2e481dba5654eb5141d0f315f Mon Sep 17 00:00:00 2001
-From: czvv <t2026100069911305@eduxiji.net>
-Date: Mon, 7 Sep 2026 20:10:43 +0800
-Subject: [PATCH 1/2] =?UTF-8?q?feat:=20=E4=B8=BA=20Convolution3D=20?=
- =?UTF-8?q?=E5=A2=9E=E5=8A=A0=20Vulkan=20=E5=90=8E=E7=AB=AF=EF=BC=88pack1?=
- =?UTF-8?q?=20=E7=9B=B4=E6=8E=A5=E5=8D=B7=E7=A7=AF=EF=BC=89?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-- 新增 Convolution3D_vulkan，继承 Convolution3D，support_vulkan=true、
-  support_vulkan_packing=false（标量布局）；
-- shader 以内嵌字符串携带，create_pipeline 用 compile_spirv_module 编译，
-  每个 work item 计算一个输出元素，遍历 kernel 邻域与全部输入通道，边界
-  判断填 pad_value（等价于 CPU make_padding 后直接卷积）；
-- forward 将 SAME padding（-233/-234）折算为显式 pad 量；
-- 输出寻址用 cstep 对齐（VkMat 4D 通道间有 padding，非稠密）；
-- 注册机制：ncnn_add_layer 自动检测 layer/vulkan/convolution3d_vulkan.cpp
-  存在即注册 Convolution3D_vulkan_layer_creator，无需手动改注册表；
-- activation_type != 0（融合激活）暂回退 CPU，SeedVR2 VAE 的 3D 卷积均为
-  无激活，不受影响。
-
-验证：seedvr2 项目 tests/conv3d_vulkan_runner.cpp 5 组参数（3x3x3/1x1x1、
-stride 1/2、dilation、显式/SAME pad、多通道、非4倍数 cstep）全部
-max|diff|=0 通过。
----
- src/layer/vulkan/convolution3d_vulkan.cpp | 274 ++++++++++++++++++++++
- src/layer/vulkan/convolution3d_vulkan.h   |  38 +++
- 2 files changed, 312 insertions(+)
- create mode 100644 src/layer/vulkan/convolution3d_vulkan.cpp
- create mode 100644 src/layer/vulkan/convolution3d_vulkan.h
-
 diff --git a/src/layer/vulkan/convolution3d_vulkan.cpp b/src/layer/vulkan/convolution3d_vulkan.cpp
 new file mode 100644
-index 00000000..66f5de15
+index 00000000..5f079839
 --- /dev/null
 +++ b/src/layer/vulkan/convolution3d_vulkan.cpp
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,289 @@
 +// Copyright 2021 Tencent
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -49,9 +17,9 @@ index 00000000..66f5de15
 +namespace ncnn {
 +
 +// ============================================================================
-+// Convolution3D 的 Vulkan compute shader（pack1 直接卷积）
++// Convolution3D 的 Vulkan compute shader（pack1 布局、四输出通道直接卷积）
 +// ============================================================================
-+// 每个 work item 计算一个输出元素 (p, z_out, i_out, j_out)，遍历 kernel 邻域
++// 每个 work item 计算同一空间位置的四个输出通道，遍历 kernel 邻域
 +// （kd×kh×kw）与全部输入通道。边界用 if 判断：越界填 pad_value，等价于 CPU
 +// 侧 make_padding 后直接卷积。与 CPU 逐元素等价：
 +//   out[p][z][i][j] = bias[p] + Σ_q Σ_{kd,kh,kw}
@@ -107,9 +75,10 @@ index 00000000..66f5de15
 +    if (gi >= p.total)
 +        return;
 +
-+    // 解码稠密索引 gi 为 (p, z_out, i_out, j_out)。
++    // 解码稠密索引 gi 为 (p/4, z_out, i_out, j_out)。四个输出通道共享
++    // 输入读取，避免原实现为每个输出通道重复读取相同输入元素。
 +    uint spatial_out = p.outw * p.outh * p.outd;
-+    uint p_out = gi / spatial_out;
++    uint p_out_base = (gi / spatial_out) * 4u;
 +    uint rem = gi % spatial_out;
 +    uint z_out = rem / (p.outh * p.outw);
 +    uint rem2 = rem % (p.outh * p.outw);
@@ -117,11 +86,16 @@ index 00000000..66f5de15
 +    uint j_out = rem2 % p.outw;
 +
 +    // 输出地址用 cstep 对齐（VkMat 4D 通道间有 padding，非稠密）。
-+    uint out_addr = p_out * p.out_cstep + z_out * (p.outh * p.outw) + i_out * p.outw + j_out;
++    uint out_offset = z_out * (p.outh * p.outw) + i_out * p.outw + j_out;
 +
-+    afp sum = 0.0;
++    afpvec4 sum = afpvec4(0.0);
 +    if (p.bias_term == 1u)
-+        sum = buffer_ld1(bias_blob, p_out);
++    {
++        if (p_out_base + 0u < p.num_output) sum.x = buffer_ld1(bias_blob, p_out_base + 0u);
++        if (p_out_base + 1u < p.num_output) sum.y = buffer_ld1(bias_blob, p_out_base + 1u);
++        if (p_out_base + 2u < p.num_output) sum.z = buffer_ld1(bias_blob, p_out_base + 2u);
++        if (p_out_base + 3u < p.num_output) sum.w = buffer_ld1(bias_blob, p_out_base + 3u);
++    }
 +
 +    for (uint q = 0u; q < p.channels; q++)
 +    {
@@ -144,22 +118,30 @@ index 00000000..66f5de15
 +                        v = buffer_ld1(bottom_blob, addr);
 +                    }
 +
-+                    uint widx = p_out * (p.channels * p.maxk) + q * p.maxk
++                    uint kernel_offset = q * p.maxk
 +                        + (kd * p.kernel_h * p.kernel_w + kh * p.kernel_w + kw);
-+                    afp wt = buffer_ld1(weight_blob, widx);
++                    uint output_stride = p.channels * p.maxk;
++                    afpvec4 wt = afpvec4(0.0);
++                    if (p_out_base + 0u < p.num_output) wt.x = buffer_ld1(weight_blob, (p_out_base + 0u) * output_stride + kernel_offset);
++                    if (p_out_base + 1u < p.num_output) wt.y = buffer_ld1(weight_blob, (p_out_base + 1u) * output_stride + kernel_offset);
++                    if (p_out_base + 2u < p.num_output) wt.z = buffer_ld1(weight_blob, (p_out_base + 2u) * output_stride + kernel_offset);
++                    if (p_out_base + 3u < p.num_output) wt.w = buffer_ld1(weight_blob, (p_out_base + 3u) * output_stride + kernel_offset);
 +                    sum += v * wt;
 +                }
 +            }
 +        }
 +    }
-+    buffer_st1(top_blob, out_addr, sum);
++    if (p_out_base + 0u < p.num_output) buffer_st1(top_blob, (p_out_base + 0u) * p.out_cstep + out_offset, sum.x);
++    if (p_out_base + 1u < p.num_output) buffer_st1(top_blob, (p_out_base + 1u) * p.out_cstep + out_offset, sum.y);
++    if (p_out_base + 2u < p.num_output) buffer_st1(top_blob, (p_out_base + 2u) * p.out_cstep + out_offset, sum.z);
++    if (p_out_base + 3u < p.num_output) buffer_st1(top_blob, (p_out_base + 3u) * p.out_cstep + out_offset, sum.w);
 +}
 +)VKGLSL";
 +
 +Convolution3D_vulkan::Convolution3D_vulkan()
 +{
-+    // 标量布局（elempack=1），保持与 seedvr2 自定义层一致，避免 2D pack4 行打包
-+    // 的布局陷阱；正确性优先，性能优化（pack4/im2col）留待后续。
++    // 张量仍保持标量布局（elempack=1），但 shader 在寄存器中并行累加四个
++    // 输出通道。这样不改变网络图布局，也能复用每次输入读取。
 +    support_vulkan = true;
 +    support_vulkan_packing = false;
 +
@@ -263,7 +245,8 @@ index 00000000..66f5de15
 +        return -100;
 +
 +    const int maxk = kernel_w * kernel_h * kernel_d;
-+    const uint32_t total = static_cast<uint32_t>(num_output) * outw * outh * outd;
++    const uint32_t output_groups = (static_cast<uint32_t>(num_output) + 3u) / 4u;
++    const uint32_t total = output_groups * outw * outh * outd;
 +
 +    std::vector<VkMat> bindings(4);
 +    bindings[0] = bottom_blob;
@@ -312,10 +295,10 @@ index 00000000..66f5de15
 +} // namespace ncnn
 diff --git a/src/layer/vulkan/convolution3d_vulkan.h b/src/layer/vulkan/convolution3d_vulkan.h
 new file mode 100644
-index 00000000..f0e2f02e
+index 00000000..2af4488c
 --- /dev/null
 +++ b/src/layer/vulkan/convolution3d_vulkan.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,39 @@
 +// Copyright 2021 Tencent
 +// SPDX-License-Identifier: BSD-3-Clause
 +
@@ -326,9 +309,10 @@ index 00000000..f0e2f02e
 +
 +namespace ncnn {
 +
-+// Convolution3D 的 Vulkan 后端：pack1 直接卷积（不 im2col/winograd），
++// Convolution3D 的 Vulkan 后端：pack1 张量布局、四输出通道直接卷积
++// （不 im2col/winograd），
 +// 支持显式 pad 与 SAME pad（-233/-234 在 forward 中折算为显式 pad 量）。
-+// 每个 work item 计算一个输出元素，遍历 kernel 邻域与输入通道。
++// 每个 work item 在同一空间位置累加至多四个输出通道，从而复用输入读取。
 +class Convolution3D_vulkan : public Convolution3D
 +{
 +public:
@@ -354,6 +338,3 @@ index 00000000..f0e2f02e
 +} // namespace ncnn
 +
 +#endif // LAYER_CONVOLUTION3D_VULKAN_H
--- 
-2.43.0
-

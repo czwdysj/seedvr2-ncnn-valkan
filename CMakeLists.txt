@@ -143,6 +143,10 @@ if(SEEDVR2_BUILD_TESTS)
         add_test(NAME seedvr2_conv3d_vulkan_runner COMMAND seedvr2_conv3d_vulkan_runner)
         set_tests_properties(seedvr2_conv3d_vulkan_runner PROPERTIES LABELS "smoke;vulkan")
 
+        add_executable(seedvr2_vae_decoder_bench tests/vae_decoder_bench.cpp)
+        target_include_directories(seedvr2_vae_decoder_bench PRIVATE src)
+        target_link_libraries(seedvr2_vae_decoder_bench PRIVATE seedvr2_ncnn)
+
         add_executable(seedvr2_sampler_vulkan_runner tests/sampler_vulkan_runner.cpp)
         target_include_directories(seedvr2_sampler_vulkan_runner PRIVATE src)
         target_link_libraries(seedvr2_sampler_vulkan_runner PRIVATE seedvr2_ncnn)
