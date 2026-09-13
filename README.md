@@ -4,7 +4,7 @@
 
 运行时为纯 C++，不依赖 Python、PyTorch 或 CUDA Toolkit。命令行程序可直接完成视频解码、模型推理、H.264 编码和音频保留。
 
-> 当前仅支持 Linux/WSL2 x86_64，并只在 NVIDIA Vulkan GPU 上验证。项目仍处于开发阶段，请先使用短视频。
+> 当前仅支持 Linux/WSL2 x86_64，并只在 NVIDIA Vulkan GPU 上验证。
 
 ## 效果
 
@@ -139,13 +139,6 @@ target_link_libraries(your_app PRIVATE SeedVR2::seedvr2_ncnn)
 - [自定义层总览](docs/custom_layers/overview_zh.md)
 - [Attention 精度验证](docs/attention_accuracy_validation_5090_zh.md)
 - [VAE 3D 卷积优化](docs/v2.0开发优化/VAE_3D卷积优化详解.md)
-
-## 已知问题
-
-- 长视频时序分块、重叠融合和断点恢复尚未实现。
-- 当前会一次性解码和处理全部帧，内存与显存占用随视频长度增加。
-- `--resident` 速度更快，但会额外占用大量显存；OOM 时请去掉该参数。
-- AMD/Intel Vulkan 后端未经测试。
 
 ## 许可
 
