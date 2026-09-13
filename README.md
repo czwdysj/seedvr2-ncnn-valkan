@@ -8,6 +8,12 @@
 
 ## 效果
 
+真实视频首帧的静态对比（输入已按模型规则中心裁剪到 `480x256`）：
+
+| 修复前 | SeedVR2 NCNN Vulkan 修复后 |
+|---|---|
+| ![修复前的低清晰度视频帧](docs/assets/seedvr2_demo_before.png) | ![SeedVR2 NCNN Vulkan 修复后的视频帧](docs/assets/seedvr2_demo_after.png) |
+
 同一段 5 帧视频的输入与 NCNN Vulkan 输出：
 
 ![Big Buck Bunny 输入与 SeedVR2 输出对比](docs/assets/seedvr2_demo_comparison.gif)
